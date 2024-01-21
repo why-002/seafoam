@@ -1,4 +1,5 @@
 use std::future::IntoFuture;
+use std::hash::Hash;
 use std::net::SocketAddr;
 use std::ptr::read;
 use std::sync::mpsc::{Sender, Receiver};
@@ -19,25 +20,11 @@ use serde::{Serialize, Deserialize};
 use flashmap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "type")]
-pub enum EchoPayload {
-    Echo{
-        echo: String,
-        msg_id: u32
-    },
-    EchoOk{
-        echo: String,
-        in_reply_to: u32
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Req {
     S{
         key: String,
-        value: String,
+        value: Data,
         msg_id: u32
     },
     G{
@@ -45,12 +32,21 @@ pub enum Req {
         msg_id: u32
     },
     GOk{
-        value: String,
+        value: Data,
         in_reply_to: u32
     },
     SOk{
         in_reply_to: u32
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Data{
+    String(String),
+    Int(u32),
+    Array(Vec<Data>),
+    Map(HashMap<String, Data>)
 }
 
 pub enum RaftState{
@@ -60,12 +56,12 @@ pub enum RaftState{
 }
 
 async fn echo(
-     req: Request<hyper::body::Incoming>, reader: flashmap::ReadHandle<String, String>, se: Sender<(String, String)>
+     req: Request<hyper::body::Incoming>, reader: flashmap::ReadHandle<String, Data>, se: Sender<(String, Data)>
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     match (req.method(), req.uri().path()) {
         // Serve some instructions at /
         (&Method::GET, "/") => Ok(Response::new(full(
-            reader.guard().get("Fizz").unwrap().clone(),
+            "Hello world",
         ))),
 
         (&Method::POST, "/get") => {
@@ -145,16 +141,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on http://{}", addr);
-
-    let map = Arc::new(RwLock::new(BTreeMap::new()));
-    map.write().unwrap().insert("hi", "hello");
-    let x = map.read().unwrap().get("hi").unwrap().to_string();
-    println!("{}", x);
+    
     let (mut writer, reader) = flashmap::new();
     let mut write_guard = writer.guard();
 
-    let (se, re) = channel();
-    se.send(("Fizz".to_owned(), "Buzz".to_owned()));
+    let (se, re) = channel::<(String, Data)>();
+    se.send(("Fizz".to_owned(), Data::String("Buzz".to_owned())));
     let message = re.recv().unwrap();
 
     write_guard.insert(message.0, message.1);
