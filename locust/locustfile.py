@@ -1,8 +1,8 @@
 import time
-from locust import HttpUser, task, between, constant_throughput
+from locust import HttpUser, task, between, constant_throughput, FastHttpUser
 
-class QuickstartUser(HttpUser):
-    wait_time = constant_throughput(100)
+class QuickstartUser(FastHttpUser):
+    wait_time = constant_throughput(1000)
 
     @task(9)
     def get(self):
