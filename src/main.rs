@@ -1,8 +1,10 @@
+use std::borrow::Borrow;
+use std::collections::hash_map::RandomState;
 use std::future::IntoFuture;
 use std::hash::Hash;
 use std::net::SocketAddr;
+use std::os::linux::raw::stat;
 use std::ptr::read;
-use std::sync::mpsc::{Sender, Receiver};
 use std::sync::mpsc::channel;
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
@@ -11,10 +13,12 @@ use hyper::server::conn::http1;
 
 use hyper::service::service_fn;
 use hyper::{body::Body, Method, Request, Response, StatusCode};
+use hyper_util::server::conn::auto::Http1Builder;
 use tokio::net::TcpListener;
 use hyper_util::rt::TokioIo;
 
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc};
+use tokio::sync::{RwLock, watch::*, watch};
 use std::collections::{HashMap, HashSet, BTreeMap};
 use serde::{Serialize, Deserialize};
 use flashmap;
@@ -49,14 +53,60 @@ pub enum Data{
     Map(HashMap<String, Data>)
 }
 
+pub enum LogEntry{
+    Insert(Data),
+    Delete(Data)
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum RaftState{
     Leader,
     Canidate,
     Follower
 }
 
+struct RaftCore {
+    max_committed: u32,
+    max_received: u32,
+    current_term: u32,
+}
+
+async fn bar(req: Request<hyper::body::Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
+    return Ok(Response::new(full("")));
+}
+
+async fn foo(state_ref: Receiver<RaftState>, state_updater: Sender<RaftState>) -> Result<(), std::io::Error> {
+    let addr = SocketAddr::from(([0,0,0,0], 3010));
+    let listener = TcpListener::bind(addr).await?;
+    println!("Listening on http://{}", addr);
+    loop{
+        let state = *state_ref.borrow();
+        match state {
+            RaftState::Follower => {
+                if let Ok(Ok((socket, _))) = tokio::time::timeout(tokio::time::Duration::from_secs(1), listener.accept()).await {
+                    todo!("yay, state was {:?}", state);
+                    //let io = TokioIo::new(stream);
+                }
+                else{
+                    eprintln!("Changing to Canidate");
+                    state_updater.send(RaftState::Canidate);
+                }
+            }
+            RaftState::Canidate => {
+                eprintln!("State is {:?}. Changing to Leader", state);
+                state_updater.send(RaftState::Leader);
+
+            }
+            RaftState::Leader => {
+                eprintln!("I'm the leader.");
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+            }
+        }              
+}
+
 async fn echo(
-     req: Request<hyper::body::Incoming>, reader: flashmap::ReadHandle<String, Data>, se: Sender<(String, Data)>
+     req: Request<hyper::body::Incoming>, reader: flashmap::ReadHandle<String, Data>, se: std::sync::mpsc::Sender<(String, Data)>
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     match (req.method(), req.uri().path()) {
         // Serve some instructions at /
@@ -137,6 +187,16 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let addresses: Vec<String> = Vec::new();
+    let log: Vec<LogEntry> = Vec::new();
+    let (state_sender, state_receiver) = watch::channel(RaftState::Follower);
+    //let internal_state = RaftCore {  };
+
+
+
+
+
+
     let addr = SocketAddr::from(([0,0,0,0], 3000));
     
     let listener = TcpListener::bind(addr).await?;
@@ -157,13 +217,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let r = re;
         loop {
             if let Ok(msg) = r.recv(){
-                println!("{:?}", msg);
                 let mut w_guard= w.guard();
                 w_guard.insert(msg.0, msg.1);
                 w_guard.publish();
             }
         }
     });
+    tokio::task::spawn(foo(state_receiver.clone(), state_sender));
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -179,9 +239,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 a
             }
         });
-
+        let http = http1::Builder::new();
         tokio::task::spawn(async move {
-            if let Err(err) = http1::Builder::new()
+            if let Err(err) = http
                 .serve_connection(io, service)
                 .await
             {
