@@ -1,10 +1,4 @@
-use std::borrow::Borrow;
-use std::collections::hash_map::RandomState;
-use std::future::IntoFuture;
-use std::hash::Hash;
 use std::net::SocketAddr;
-use std::os::linux::raw::stat;
-use std::ptr::read;
 use std::sync::mpsc::channel;
 use bytes::Bytes;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
@@ -18,7 +12,7 @@ use tokio::net::TcpListener;
 use hyper_util::rt::TokioIo;
 
 use std::sync::{Arc};
-use tokio::sync::{RwLock, watch::*, watch};
+use tokio::sync::{RwLock, watch::*, watch, mpsc::{self, *}};
 use std::collections::{HashMap, HashSet, BTreeMap};
 use serde::{Serialize, Deserialize};
 use flashmap;
@@ -75,7 +69,7 @@ async fn bar(req: Request<hyper::body::Incoming>) -> Result<Response<BoxBody<Byt
     return Ok(Response::new(full("")));
 }
 
-async fn foo(state_ref: Receiver<RaftState>, state_updater: Sender<RaftState>) -> Result<(), std::io::Error> {
+async fn foo(state_ref: watch::Receiver<RaftState>, state_updater: watch::Sender<RaftState>) -> Result<(), std::io::Error> {
     let addr = SocketAddr::from(([0,0,0,0], 3010));
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on http://{}", addr);
@@ -98,7 +92,7 @@ async fn foo(state_ref: Receiver<RaftState>, state_updater: Sender<RaftState>) -
 
             }
             RaftState::Leader => {
-                eprintln!("I'm the leader.");
+                //eprintln!("I'm the leader.");
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
             }
@@ -106,7 +100,7 @@ async fn foo(state_ref: Receiver<RaftState>, state_updater: Sender<RaftState>) -
 }
 
 async fn echo(
-     req: Request<hyper::body::Incoming>, reader: flashmap::ReadHandle<String, Data>, se: std::sync::mpsc::Sender<(String, Data)>
+     req: Request<hyper::body::Incoming>, reader: flashmap::ReadHandle<String, Data>, se: tokio::sync::mpsc::Sender<(String, Data)>
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     match (req.method(), req.uri().path()) {
         // Serve some instructions at /
@@ -146,9 +140,10 @@ async fn echo(
                     let obj: Req = serde_json::from_slice(&data).unwrap();
                     match obj {
                         Req::S { key, value, msg_id } => {
-                             if let Err(err) = se.send((key, value)){
-                                println!("Error, did not send: {}", err);
-                             };
+                            let s = se.clone();
+                            tokio::task::spawn( async move {
+                                s.send((key, value)).await;
+                            });
                             let st = serde_json::to_string(&Req::SOk { in_reply_to: msg_id }).unwrap();
                             st.as_bytes().into_iter().map(|byte| *byte).collect()
                         }
@@ -192,39 +187,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (state_sender, state_receiver) = watch::channel(RaftState::Follower);
     //let internal_state = RaftCore {  };
 
-
-
-
-
-
     let addr = SocketAddr::from(([0,0,0,0], 3000));
     
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on http://{}", addr);
     
     let (mut writer, reader) = flashmap::new();
-    let mut write_guard = writer.guard();
 
-    let (se, re) = channel::<(String, Data)>();
-    se.send(("Fizz".to_owned(), Data::String("Buzz".to_owned())));
-    let message = re.recv().unwrap();
+    let (se, re) = mpsc::channel(1000);
 
-    write_guard.insert(message.0, message.1);
-    write_guard.publish();
-
-    let t = std::thread::spawn(move || {
+    let t = tokio::task::spawn(async move {
         let mut w = writer;
-        let r = re;
+        let mut r = re;
         loop {
-            if let Ok(msg) = r.recv(){
+            if let Some((key,data)) = r.recv().await {
                 let mut w_guard= w.guard();
-                w_guard.insert(msg.0, msg.1);
+                w_guard.insert(key, data);
                 w_guard.publish();
             }
         }
     });
+    
     tokio::task::spawn(foo(state_receiver.clone(), state_sender));
-
+    se.send(("Fizz".to_owned(), Data::String("Buzz".to_owned()))).await;
     loop {
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
