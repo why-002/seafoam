@@ -16,54 +16,7 @@ use tokio::sync::{RwLock, watch::*, watch, mpsc::{self, *}};
 use std::collections::{HashMap, HashSet, BTreeMap};
 use serde::{Serialize, Deserialize};
 use flashmap;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum Req {
-    S{
-        key: String,
-        value: Data,
-        msg_id: u32
-    },
-    G{
-        key: String,
-        msg_id: u32
-    },
-    GOk{
-        value: Data,
-        in_reply_to: u32
-    },
-    SOk{
-        in_reply_to: u32
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum Data{
-    String(String),
-    Int(u32),
-    Array(Vec<Data>),
-    Map(HashMap<String, Data>)
-}
-
-pub enum LogEntry{
-    Insert(Data),
-    Delete(Data)
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum RaftState{
-    Leader,
-    Canidate,
-    Follower
-}
-
-struct RaftCore {
-    max_committed: u32,
-    max_received: u32,
-    current_term: u32,
-}
+use seafoam::*; 
 
 async fn bar(req: Request<hyper::body::Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     return Ok(Response::new(full("")));
