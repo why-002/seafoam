@@ -22,38 +22,8 @@ async fn bar(req: Request<hyper::body::Incoming>) -> Result<Response<BoxBody<Byt
     return Ok(Response::new(full("")));
 }
 
-async fn foo(state_ref: watch::Receiver<RaftState>, state_updater: watch::Sender<RaftState>) -> Result<(), std::io::Error> {
-    let addr = SocketAddr::from(([0,0,0,0], 3010));
-    let listener = TcpListener::bind(addr).await?;
-    println!("Listening on http://{}", addr);
-    loop{
-        let state = *state_ref.borrow();
-        match state {
-            RaftState::Follower => {
-                if let Ok(Ok((socket, _))) = tokio::time::timeout(tokio::time::Duration::from_secs(1), listener.accept()).await {
-                    todo!("yay, state was {:?}", state);
-                    //let io = TokioIo::new(stream);
-                }
-                else{
-                    eprintln!("Changing to Canidate");
-                    state_updater.send(RaftState::Canidate);
-                }
-            }
-            RaftState::Canidate => {
-                eprintln!("State is {:?}. Changing to Leader", state);
-                state_updater.send(RaftState::Leader);
-
-            }
-            RaftState::Leader => {
-                //eprintln!("I'm the leader.");
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            }
-            }
-        }              
-}
-
 async fn echo(
-     req: Request<hyper::body::Incoming>, reader: flashmap::ReadHandle<String, Data>, se: tokio::sync::mpsc::Sender<(String, Data)>
+     req: Request<hyper::body::Incoming>, reader: flashmap::ReadHandle<String, Data>, v: Arc<RwLock<Vec<LogEntry>>>, state: watch::Receiver<RaftState>
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     match (req.method(), req.uri().path()) {
         // Serve some instructions at /
@@ -93,10 +63,22 @@ async fn echo(
                     let obj: Req = serde_json::from_slice(&data).unwrap();
                     match obj {
                         Req::S { key, value, msg_id } => {
-                            let s = se.clone();
-                            tokio::task::spawn( async move {
-                                s.send((key, value)).await;
+                            let f = state.clone();
+                            let v = v.clone();
+                            tokio::task::spawn(async move {
+                                let s = *f.borrow();
+                                match &s {
+                                    RaftState::Leader(term) => {
+                                        let mut writer = v.write().await;
+                                        let size = writer.len();
+                                        writer.push(LogEntry::Insert { key: key, data: value, index: size, term: *term })
+                                    }
+                                    _ => {
+                                        todo!();
+                                    }
+                                }
                             });
+                            
                             let st = serde_json::to_string(&Req::SOk { in_reply_to: msg_id }).unwrap();
                             st.as_bytes().into_iter().map(|byte| *byte).collect()
                         }
@@ -136,9 +118,9 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addresses: Vec<String> = Vec::new();
-    let log: Vec<LogEntry> = Vec::new();
-    let (state_sender, state_receiver) = watch::channel(RaftState::Follower);
-    //let internal_state = RaftCore {  };
+    let log = Arc::new(RwLock::new(Vec::new()));
+    let (state_sender, state_receiver) = watch::channel(RaftState::Follower(0));
+    let internal_state = Arc::new(RwLock::new(RaftCore { max_committed: 0, max_received: 0, current_term: 0, members: Vec::new() }));
 
     let addr = SocketAddr::from(([0,0,0,0], 3000));
     
@@ -147,33 +129,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     let (mut writer, reader) = flashmap::new();
 
-    let (se, re) = mpsc::channel(1000);
-
-    let t = tokio::task::spawn(async move {
-        let mut w = writer;
-        let mut r = re;
-        loop {
-            if let Some((key,data)) = r.recv().await {
-                let mut w_guard= w.guard();
-                w_guard.insert(key, data);
-                w_guard.publish();
-            }
-        }
+    let l = log.clone();
+    let i = internal_state.clone();
+    let w = tokio::task::spawn( async move { 
+        log_manager(l, writer, i.clone()).await
     });
-    
-    tokio::task::spawn(foo(state_receiver.clone(), state_sender));
-    se.send(("Fizz".to_owned(), Data::String("Buzz".to_owned()))).await;
+    let s = state_receiver.clone();
+    tokio::task::spawn(raft_state_manager(s, state_sender, internal_state.clone(), log.clone()));
     loop {
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
 
         let new_reader = reader.clone();
-        let new_se = se.clone();
+        let v = log.clone();
+        let s = state_receiver.clone();
         let service = service_fn(move |x|{
+            let l = v.clone();
             let r = new_reader.clone();
-            let s = new_se.clone();
+            let s = s.clone();
             async move{
-                let a = echo( x, r, s).await;
+                let a = echo( x, r, l, s).await;
                 a
             }
         });
