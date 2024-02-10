@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
+use std::env;
 use std::sync::mpsc::channel;
 use bytes::Bytes;
+use form_urlencoded::parse;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::body::Frame;
 use hyper::server::conn::http1;
@@ -70,7 +72,7 @@ async fn echo(
                                 match &s {
                                     RaftState::Leader(term) => {
                                         let mut writer = v.write().await;
-                                        let size = writer.len();
+                                        let size = writer.len() + 1;
                                         writer.push(LogEntry::Insert { key: key, data: value, index: size, term: *term })
                                     }
                                     _ => {
@@ -117,12 +119,12 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let addresses: Vec<String> = Vec::new();
+    let args: Vec<String> = env::args().collect();
     let log = Arc::new(RwLock::new(Vec::new()));
     let (state_sender, state_receiver) = watch::channel(RaftState::Follower(0));
     let internal_state = Arc::new(RwLock::new(RaftCore { max_committed: 0, max_received: 0, current_term: 0, members: Vec::new() }));
-
-    let addr = SocketAddr::from(([0,0,0,0], 3000));
+    internal_state.write().await.members.push(SocketAddr::from(([127,0,1,1], args[3].parse::<u16>().unwrap())));
+    let addr = SocketAddr::from(([0,0,0,0], args[1].parse::<u16>().unwrap()));
     
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on http://{}", addr);
@@ -135,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         log_manager(l, writer, i.clone()).await
     });
     let s = state_receiver.clone();
-    tokio::task::spawn(raft_state_manager(s, state_sender, internal_state.clone(), log.clone()));
+    tokio::task::spawn(raft_state_manager(s, state_sender, internal_state.clone(), log.clone(), args[2].parse::<u16>().unwrap()));
     loop {
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
