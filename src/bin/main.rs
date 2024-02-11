@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::env;
+use std::str::FromStr;
 use std::sync::mpsc::channel;
 use bytes::Bytes;
 use form_urlencoded::parse;
@@ -60,40 +61,53 @@ async fn echo(
             Ok(Response::new(frame_stream.boxed()))
         }
         (&Method::POST, "/set") => {
-            let frame_stream = req.into_body().map_frame(move |frame| {
-                let frame = if let Ok(data) = frame.into_data() {
-                    let obj: Req = serde_json::from_slice(&data).unwrap();
-                    match obj {
-                        Req::S { key, value, msg_id } => {
-                            let f = state.clone();
-                            let v = v.clone();
-                            tokio::task::spawn(async move {
-                                let s = *f.borrow();
-                                match &s {
-                                    RaftState::Leader(term) => {
-                                        let mut writer = v.write().await;
-                                        let size = writer.len() + 1;
-                                        writer.push(LogEntry::Insert { key: key, data: value, index: size, term: *term })
-                                    }
-                                    _ => {
-                                        todo!();
-                                    }
+            eprintln!("received set");
+            let mut resp = Response::builder();
+            let mut body = req.into_body();
+            let frame_stream = body.frame();
+            let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
+            let frame;
+            let obj: Req = serde_json::from_slice(&data).unwrap();
+                match obj {
+                    Req::S { key, value, msg_id } => {
+                        let f = state.borrow();
+                        let v = v.clone();
+                        match *f {
+                            RaftState::Leader(term) => {
+                                tokio::task::spawn(async move {
+                                    let mut writer = v.write().await;
+                                    let size = writer.len() + 1;
+                                    writer.push(LogEntry::Insert { key: key, data: value, index: size, term: term })
+                                });
+                                let st = serde_json::to_string(&Req::SOk { in_reply_to: msg_id }).unwrap();
+                                frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                            }
+                            RaftState::Follower(term, addr) => {
+                                if let Some(addr) = addr {
+                                    resp = resp.header("Location", "http://".to_owned() + &addr.to_string() + "/set")
+                                    .status(307);
+                                    frame = Bytes::new();
                                 }
-                            });
-                            
-                            let st = serde_json::to_string(&Req::SOk { in_reply_to: msg_id }).unwrap();
-                            st.as_bytes().into_iter().map(|byte| *byte).collect()
+                                else{
+                                    let st = serde_json::to_string(&Req::SOk { in_reply_to: msg_id }).unwrap();
+                                    frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                                }
+                            },
+                            RaftState::Canidate(term) =>{
+                                tokio::task::spawn(async move {
+                                    let mut writer = v.write().await;
+                                    let size = writer.len() + 1;
+                                    writer.push(LogEntry::Insert { key: key, data: value, index: size, term: term })
+                                });
+                                let st = serde_json::to_string(&Req::SOk { in_reply_to: msg_id }).unwrap();
+                                frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                            }
                         }
-                        _ => panic!("{:?}",obj )
                     }
-                } else {
-                    Bytes::new()
-                };
-
-                Frame::data(frame)
-            });
-
-            Ok(Response::new(frame_stream.boxed()))
+                    _ => panic!("{:?}",obj )
+                }
+                Ok(resp.body(Full::new(frame).map_err(|never| match never {})
+                .boxed()).unwrap())
         }
 
         // Return the 404 Not Found for other routes.
@@ -121,10 +135,19 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = env::args().collect();
     let log = Arc::new(RwLock::new(Vec::new()));
-    let (state_sender, state_receiver) = watch::channel(RaftState::Follower(0));
-    let internal_state = Arc::new(RwLock::new(RaftCore { max_committed: 0, max_received: 0, current_term: 0, members: Vec::new() }));
-    internal_state.write().await.members.push(SocketAddr::from(([127,0,1,1], args[3].parse::<u16>().unwrap())));
+    let (state_sender, state_receiver) = watch::channel(RaftState::Follower(0, None));
+    let internal_state = Arc::new(RwLock::new(RaftCore { max_committed: 0, max_received: 0, current_term: 0, members: Vec::new(), address: SocketAddr::from(([0,0,0,0], args[1].parse::<u16>().unwrap())) }));
+    
     let addr = SocketAddr::from(([0,0,0,0], args[1].parse::<u16>().unwrap()));
+
+    let mut writer = internal_state.write().await;
+    let max = args.len();
+    let mut i = 3;
+    while i < max {
+        writer.members.push(SocketAddr::from_str(&args[i]).unwrap());
+        i += 1;
+    }
+    drop(writer);
     
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on http://{}", addr);

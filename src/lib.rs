@@ -2,7 +2,7 @@ use bytes::buf;
 use futures_util::Future;
 use http::{request, response};
 use serde::{Serialize, Deserialize};
-use std::{any::Any, array, collections::{BTreeMap, HashMap, HashSet}, ops::Add, os::linux::raw::stat, process::Output, thread::spawn, usize::MIN};
+use std::{any::Any, array, collections::{BTreeMap, HashMap, HashSet}, ops::Add, os::linux::raw::stat, process::Output, thread::spawn, time::Duration, usize::MIN};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream, sync::{mpsc::{self, *}, watch::{self, *}, RwLock}};
 use std::sync::{Arc};
 use flashmap::{self, new};
@@ -68,7 +68,7 @@ impl LogEntry {
 pub enum RaftState{
     Leader(usize),
     Canidate(usize),
-    Follower(usize)
+    Follower(usize, Option<SocketAddr>)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +76,8 @@ pub struct RaftCore {
     pub max_committed: usize,
     pub max_received: usize,
     pub current_term: usize,
-    pub members: Vec<SocketAddr>
+    pub members: Vec<SocketAddr>,
+    pub address: SocketAddr
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +87,7 @@ pub enum RaftManagementRequest{
         current_term: usize,
         commit_to: usize,
         log_entries: Vec<LogEntry>,
+        address: SocketAddr
     },
     RequestVote{
         current_term: usize,
@@ -134,7 +136,9 @@ pub async fn log_manager(log: Arc<RwLock<Vec<LogEntry>>>, data: flashmap::WriteH
     let mut current_index = 0;
     let mut writer = data;
     loop {
-        let new_index = core.read().await.max_committed;
+        let c = core.read().await;
+        let new_index = c.max_committed;
+        drop(c);
         eprintln!("new Index: {}, log: {:?}", new_index, log.read().await);
         if new_index > current_index {
             let log_handle = log.read().await;
@@ -175,7 +179,7 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
     loop{
         let state = *state_ref.borrow();
         match state {
-            RaftState::Follower(term) => { //Rewrite to have a random 150-300ms timeout and use that impl for canidate
+            RaftState::Follower(term, _) => { //Rewrite to have a random 150-300ms timeout and use that impl for canidate
                 if let Ok(Ok((mut socket, _))) = tokio::time::timeout(tokio::time::Duration::from_secs(1), listener.accept()).await {
                     let mut buf = Vec::new();
                     socket.read_to_end(&mut buf).await
@@ -184,7 +188,7 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
                         .expect("Failed to deserialize raft management request");
 
                     match req {
-                        RaftManagementRequest::Heartbeat { latest_sent, current_term, commit_to, mut log_entries } => {
+                        RaftManagementRequest::Heartbeat { latest_sent, current_term, commit_to, mut log_entries, address} => {
                             let mut c = core.write().await;
                             
                             if c.current_term > current_term {
@@ -213,8 +217,8 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
                                         l.append(&mut log_entries);
                                         let response = &RaftManagementResponse::HeartbeatAddOne { max_received: *&old_received };
                                         eprintln!("Responding with {:?}", response);
+                                        
                                         response.send_over_tcp_and_shutdown(&mut socket).await;
-                                        continue;
                                     }
                                     else{
                                         if let Some(n) = log_entries.last() {
@@ -231,9 +235,9 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
                                         let response = RaftManagementResponse::HeartbeatOk { max_received: new_received, current_term: current_term };
                                         eprintln!("Responding with {:?}", response);
                                         response.send_over_tcp_and_shutdown(&mut socket).await;
-
                                     }
                                 }
+                                state_updater.send(RaftState::Follower(term, Some(address)));
                             }
                             else{
                                 if let Some(n) = log_entries.last() {
@@ -247,6 +251,7 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
                                 l.append(&mut log_entries);
                                 let response = RaftManagementResponse::HeartbeatOk { max_received: new_received, current_term: current_term };
                                 eprintln!("Responding with {:?}", response);
+                                state_updater.send(RaftState::Follower(term, Some(address)));
                                 response.send_over_tcp_and_shutdown(&mut socket).await;
                             }
                             drop(l);
@@ -274,10 +279,10 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
                     }
                 }
                 else{
-                    eprintln!("Changing to Canidate");
                     let mut c = core.write().await;
                     c.current_term += 1;
                     state_updater.send(RaftState::Canidate(c.current_term));
+                    eprintln!("Changing to Canidate");
                 }
             }
             RaftState::Canidate(term) => {
@@ -289,7 +294,7 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
                     }
                     else {
                         let c = core.read().await;
-                        state_updater.send(RaftState::Follower(c.current_term));
+                        state_updater.send(RaftState::Follower(c.current_term, None));
                         eprintln!("State is {:?}. Failed to win election", state);
                     }
                 } //Rewrite this to use a 150-300ms timeout
@@ -300,7 +305,7 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
                 let h = tokio::task::spawn(send_global_heartbeat(core.clone(), log.clone()));
                 let t = h.await?;
                 if t > term{
-                    state_updater.send(RaftState::Follower(t));
+                    state_updater.send(RaftState::Follower(t, None));
                     let mut c = core.write().await;
                     c.current_term = t;
                 }
@@ -374,10 +379,10 @@ pub async fn send_global_heartbeat(core: Arc<RwLock<RaftCore>>, log: Arc<RwLock<
     drop(l);
 
     let state = c.clone();
-    drop(c);
 
-    let request = serde_json::to_vec(&RaftManagementRequest::Heartbeat { latest_sent: last, current_term: state.current_term, commit_to: state.max_committed, log_entries: new_logs })
+    let request = serde_json::to_vec(&RaftManagementRequest::Heartbeat { latest_sent: last, current_term: state.current_term, commit_to: state.max_committed, log_entries: new_logs, address: c.address })
         .expect("failed to convert request to json");
+    drop(c);
 
     for address in addresses {
         let mut stream = TcpStream::connect(address).await.unwrap();
