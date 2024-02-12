@@ -412,38 +412,41 @@ pub async fn send_global_heartbeat(core: Arc<RwLock<RaftCore>>, log: Arc<RwLock<
         .expect("failed to convert request to json");
     drop(c);
 
-    for address in addresses {
-        if let Ok(mut stream) = TcpStream::connect(address).await{
-            let (mut read, mut write) = stream.split();
-            write.write_all(request.as_slice()).await;
-            write.shutdown().await;
-            let mut buf = Vec::new();
-            read.read_to_end(&mut buf).await
-                .expect("Failed to read heartbeat response");
-            let response = serde_json::from_slice(&buf)
-                .expect("Failed to parse heartbeat response");
-            match response {
-                RaftManagementResponse::HeartbeatAddOne { max_received } => todo!("Not implemented add-one responses"),
-                RaftManagementResponse::HeartbeatOk { max_received, current_term } => {
-                    max_recieved_members.push(max_received);
-                },
-                RaftManagementResponse::HeartbeatRejected { current_term } => {
-                    let c = core.read().await;
-                    if c.current_term < current_term {
-                        return current_term;
+    if addresses.len() > 0{
+        for address in addresses {
+            if let Ok(mut stream) = TcpStream::connect(address).await{
+                let (mut read, mut write) = stream.split();
+                write.write_all(request.as_slice()).await;
+                write.shutdown().await;
+                let mut buf = Vec::new();
+                read.read_to_end(&mut buf).await
+                    .expect("Failed to read heartbeat response");
+                let response = serde_json::from_slice(&buf)
+                    .expect("Failed to parse heartbeat response");
+                match response {
+                    RaftManagementResponse::HeartbeatAddOne { max_received } => todo!("Not implemented add-one responses"),
+                    RaftManagementResponse::HeartbeatOk { max_received, current_term } => {
+                        max_recieved_members.push(max_received);
+                    },
+                    RaftManagementResponse::HeartbeatRejected { current_term } => {
+                        let c = core.read().await;
+                        if c.current_term < current_term {
+                            return current_term;
+                        }
                     }
+                    _ => panic!("Received a voting response instead of a heartbeat response")
                 }
-                _ => panic!("Received a voting response instead of a heartbeat response")
             }
         }
-    }
-    let mut c = core.write().await;
-    max_recieved_members.push(c.max_received);
-    let loc = max_recieved_members.len() / 2 - 1;
-    let (_, median, _) = max_recieved_members.select_nth_unstable(loc);
+        let mut c = core.write().await;
+        max_recieved_members.push(c.max_received);
+        let loc = max_recieved_members.len() / 2 - 1;
+        let (_, median, _) = max_recieved_members.select_nth_unstable(loc);
+        
     
-
-    c.max_committed = *median;
+        c.max_committed = *median;
+    }
+    
 
     return state.current_term;
 }
