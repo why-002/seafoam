@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::env;
 use std::str::FromStr;
 use std::sync::mpsc::channel;
+use std::time::SystemTime;
 use bytes::Bytes;
 use form_urlencoded::parse;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
@@ -61,7 +62,6 @@ async fn echo(
             Ok(Response::new(frame_stream.boxed()))
         }
         (&Method::POST, "/set") => {
-            eprintln!("received set");
             let mut resp = Response::builder();
             let mut body = req.into_body();
             let frame_stream = body.frame();
@@ -72,6 +72,9 @@ async fn echo(
                     Req::S { key, value, msg_id } => {
                         let f = state.borrow();
                         let v = v.clone();
+                        if key == "foo"{
+                            eprintln!("Received foo at: {:?}", SystemTime::now());
+                        }
                         match *f {
                             RaftState::Leader(term) => {
                                 tokio::task::spawn(async move {
