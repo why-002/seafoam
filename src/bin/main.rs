@@ -70,12 +70,12 @@ async fn echo(
             let obj: Req = serde_json::from_slice(&data).unwrap();
                 match obj {
                     Req::S { key, value, msg_id } => {
-                        let f = state.borrow();
+                        let f = state.borrow().clone();
                         let v = v.clone();
                         if key == "foo"{
                             eprintln!("Received foo at: {:?}", SystemTime::now());
                         }
-                        match *f {
+                        match f {
                             RaftState::Leader(term) => {
                                 tokio::task::spawn(async move {
                                     let mut writer = v.write().await;
@@ -85,7 +85,7 @@ async fn echo(
                                 let st = serde_json::to_string(&Req::SOk { in_reply_to: msg_id }).unwrap();
                                 frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
                             }
-                            RaftState::Follower(term, addr) => {
+                            RaftState::Follower(term, addr, _) => {
                                 if let Some(addr) = addr {
                                     resp = resp.header("Location", "http://".to_owned() + &addr.to_string() + "/set")
                                     .status(307);
@@ -138,8 +138,8 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = env::args().collect();
     let log = Arc::new(RwLock::new(Vec::new()));
-    let (state_sender, state_receiver) = watch::channel(RaftState::Follower(0, None));
-    let internal_state = Arc::new(RwLock::new(RaftCore { max_committed: 0, max_received: 0, current_term: 0, members: Vec::new(), address: SocketAddr::from(([0,0,0,0], args[1].parse::<u16>().unwrap())) }));
+    let (state_sender, state_receiver) = watch::channel(RaftState::Follower(0, None, true));
+    let internal_state = Arc::new(RwLock::new(RaftCore { max_committed: 0, max_received: 0, current_term: 1, members: Vec::new(), address: SocketAddr::from(([0,0,0,0], args[1].parse::<u16>().unwrap())), last_voted: 0 }));
     
     let addr = SocketAddr::from(([0,0,0,0], args[1].parse::<u16>().unwrap()));
 
