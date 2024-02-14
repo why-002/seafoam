@@ -1,14 +1,14 @@
-use bytes::buf;
-use futures_util::Future;
+use futures_util::{future::poll_fn, Future, FutureExt};
 use http::{request, response};
 use serde::{Serialize, Deserialize};
 use core::time;
-use std::{any::Any, array, collections::{BTreeMap, HashMap, HashSet}, ops::Add, os::linux::raw::stat, process::Output, thread::{current, spawn}, time::{Duration, SystemTime}, usize::MIN};
+use std::{any::Any, array, collections::{BTreeMap, HashMap, HashSet}, ops::Add, process::Output, task::Poll, thread::{current, spawn}, time::{Duration, SystemTime}, usize::MIN};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::TcpStream, sync::{mpsc::{self, *}, watch::{self, *}, RwLock}};
 use std::sync::{Arc};
 use flashmap::{self, new};
 use std::net::SocketAddr;
 use tokio::net::{TcpListener};
+use anyhow::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -119,18 +119,21 @@ pub enum RaftManagementResponse{
     }
 }
 
-// impl RaftManagementRequest{
-//     send(){
-
-//     }
-// }
+impl RaftManagementRequest{
+    async fn send_over_tcp_and_shutdown(&self, socket: &mut TcpStream) -> Result<(), Error> {
+        let response = serde_json::to_vec(&self)?;
+        socket.write_all(&response).await?;
+        socket.shutdown().await?;
+        Ok(())
+    }
+}
 
 impl RaftManagementResponse {
-     async fn send_over_tcp_and_shutdown(&self, socket: &mut TcpStream){
-        let response = serde_json::to_vec(&self)
-            .expect("Failed to serialize Raft request");
-        socket.write_all(&response).await.expect("Failed to send RaftManagementResponse");
-        socket.shutdown().await.expect("Failed on shutdown of socket");
+     async fn send_over_tcp_and_shutdown(&self, socket: &mut TcpStream) -> Result<(), Error> {
+        let response = serde_json::to_vec(&self)?;
+        socket.write_all(&response).await?;
+        socket.shutdown().await?;
+        Ok(())
      }
  }
 
@@ -167,15 +170,9 @@ pub async fn log_manager(log: Arc<RwLock<Vec<LogEntry>>>, data: flashmap::WriteH
     }
 }
 
-//TODO: Write as a tcp connection, dont bother with http.
-
-
-
-
-//TODO: write canidate as non-blocking and have it keep looking out for follower stuff
 // Fix writing for TCP
 // Fix the response logic for heartbeats and maybe votes too
-// need a fix for the manager to realize that it can no longer stay a follower, trying to used changed for this, but this caused a deadlock last night
+// Heartbeats need to accurately replicate taking in heartbeat AddOnes
 pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_updater: watch::Sender<RaftState>, core: Arc<RwLock<RaftCore>>, log: Arc<RwLock<Vec<LogEntry>>>, port: u16) -> Result<(), std::io::Error> {
     let addr = SocketAddr::from(([0,0,0,0], port));
     let listener = TcpListener::bind(addr).await?;
@@ -198,20 +195,20 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     if let Ok(won_election) = tokio::time::timeout(tokio::time::Duration::from_secs(1), run_election(core_copy.clone())).await {
                         eprintln!("Finished election");
-                        if won_election {
+                        if let Ok(_) = won_election {
                             eprintln!("won");
                             let state_updater = state_copy.write().await;
                             state_updater.send(RaftState::Leader(term));
                             eprintln!("State is {:?}. Changing to Leader", state);
                         }
                         else {
-                            let mut c = core_copy.write().await;
-                            c.current_term += 1;
-                            let term = c.current_term;
                             let state_updater = state_copy.write().await;
                             let current_state = state_updater.borrow().to_owned();
-                            match  current_state {
+                            match current_state {
                                 RaftState::Canidate(_) => {
+                                    let mut c = core_copy.write().await;
+                                    c.current_term += 1;
+                                    let term = c.current_term;
                                     state_updater.send(RaftState::Canidate(term));
                                 },
                                 _ => {}
@@ -222,7 +219,7 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
                     else {
                         eprintln!("election timed out");
                         let state_updater = state_copy.write().await;
-                        let current_state = state_updater.borrow().to_owned();
+                        let current_state = state_updater.borrow().clone();
                         match  current_state {
                             RaftState::Canidate(_) => {
                                 let mut c = core_copy.write().await;
@@ -239,7 +236,7 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
                     //eprintln!("I'm the leader.");
                     let h = tokio::task::spawn(send_global_heartbeat(core_copy.clone(), log_copy.clone()));
                     let t = h.await;
-                    if let Ok(t) = t {
+                    if let Ok(Ok(t)) = t {
                         if t > term {
                             let mut c = core_copy.write().await;
                             c.current_term += 1;
@@ -266,7 +263,7 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
         }
         });
 
-
+        // Rewrite to drop c for as long as possible for perf
     loop {
         if let Ok((mut socket, _)) = listener.accept().await {
             let mut buf = Vec::new();
@@ -373,68 +370,43 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
     }      
 }
 
-//TODO: finish and implement a lock preventing a node from voting twice, when voting, mark the term you are voting in
-pub async fn run_election(core: Arc<RwLock<RaftCore>>) -> bool {
+
+// TODO: use is_finished() on spawned threads in order to do async, probably write a threadpool struct
+pub async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
     let mut c = core.write().await;
     if c.last_voted >= c.current_term {
         c.current_term = c.last_voted;
-        return false;
+        return Ok(false);
     }
     let members = c.members.clone();
     let target_votes = (members.len() + 1) / 2 + 1;
     let mut current_votes = 1;
 
-    let request = serde_json::to_vec(&RaftManagementRequest::RequestVote { current_term: c.current_term, max_received: c.max_received })
-    .expect("failed to convert request to json");
-    
+    let request = RaftManagementRequest::RequestVote { current_term: c.current_term, max_received: c.max_received };
+
     eprintln!("{:?}", members);
     for address in members {
         // Make request and increment current_votes if it voted for you
-        let stream = TcpStream::connect(address).await;
-        if let Ok(mut stream) = stream {
-            let i = tokio::time::timeout(time::Duration::from_millis(50), stream.write_all(request.as_slice())).await;
-            let j = tokio::time::timeout(time::Duration::from_millis(50),  stream.shutdown()).await;
-            if let Err(_) = j {
-                eprintln!("shutdown failed");
-                continue;
-            }
-            if let Err(_) = i {
-                eprintln!("write failed");
-                continue;
-            }
-            let mut buf = Vec::new();
-            if let Ok(_) = tokio::time::timeout(time::Duration::from_millis(50),stream.read_to_end(&mut buf)).await {
-                if let Ok(response) = serde_json::from_slice(&buf) {
-                    match response {
-                        RaftManagementResponse::VoteOk {  } => {current_votes += 1},
-                        RaftManagementResponse::VoteRejected { current_term, max_received: _ } => {
-                            eprintln!("Vote was rejected, updating term");
-                            if c.current_term < current_term {
-                                c.current_term = current_term;
-                                return false
-                            }
-                        },
-                        _ => panic!("Received a heartbeat response instead of a vote response")
-                    }
+        let response = send_vote_request(address, request.clone()).await?;
+        match response {
+            RaftManagementResponse::VoteOk {  } => {current_votes += 1},
+            RaftManagementResponse::VoteRejected { current_term, max_received: _ } => {
+                eprintln!("Vote was rejected, updating term");
+                if c.current_term < current_term {
+                    c.current_term = current_term;
+                    return Ok(false);
                 }
-                else {
-                    eprintln!("Failed to parse vote response");
-                }
-            }
-            else{
-                eprintln!("vote response stream invalid");
-            }
-        }
-        else {
-            eprintln!("Failed to connect to {:?}", address);
+            },
+            _ => panic!("Received a heartbeat response instead of a vote response")
         }
     }
     eprintln!("Votes {}:{}", current_votes, target_votes);
-    return current_votes >= target_votes;
+    return Ok(current_votes >= target_votes);
 }
 
 //TODO: rewrite so the heartbeats are not sync with each other
-pub async fn send_global_heartbeat(core: Arc<RwLock<RaftCore>>, log: Arc<RwLock<Vec<LogEntry>>>) -> usize {
+// Rewrite so it loops sending lower lasts until it succeded (requires them to be async from each other)
+pub async fn send_global_heartbeat(core: Arc<RwLock<RaftCore>>, log: Arc<RwLock<Vec<LogEntry>>>) -> Result<usize, Error> {
     let l = log.read().await;
     let mut c = core.write().await;
     let mut max_recieved_members = Vec::new();
@@ -442,7 +414,7 @@ pub async fn send_global_heartbeat(core: Arc<RwLock<RaftCore>>, log: Arc<RwLock<
     let addresses = c.members.clone();
 
     if addresses.len() == 0 {
-        return c.current_term;
+        return Ok(c.current_term);
     }
 
     let new_logs = l.clone().into_iter().filter(|x| {
@@ -458,31 +430,23 @@ pub async fn send_global_heartbeat(core: Arc<RwLock<RaftCore>>, log: Arc<RwLock<
 
     let mut state = c.clone();
 
-    let request = serde_json::to_vec(&RaftManagementRequest::Heartbeat { latest_sent: last, current_term: state.current_term, commit_to: state.max_committed, log_entries: new_logs, address: c.address })
-        .expect("failed to convert request to json");
+    let request = RaftManagementRequest::Heartbeat { latest_sent: last, current_term: state.current_term, commit_to: state.max_committed, log_entries: new_logs, address: c.address };
 
     for address in addresses {
-        if let Ok(mut stream) = TcpStream::connect(address).await {
-            let (mut read, mut write) = stream.split();
-            write.write_all(request.as_slice()).await;
-            write.shutdown().await;
-            let mut buf = Vec::new();
-            if let Ok(_) = read.read_to_end(&mut buf).await {
-                if let Ok(response) = serde_json::from_slice(&buf) {
-                    match response {
-                        RaftManagementResponse::HeartbeatAddOne { max_received } => {todo!("Not implemented add-one responses")},
-                        RaftManagementResponse::HeartbeatOk { max_received, current_term } => {
-                            max_recieved_members.push(max_received);
-                        },
-                        RaftManagementResponse::HeartbeatRejected { current_term } => {
-                            state.current_term = state.current_term.max(current_term);
-                        }
-                        _ => panic!("Received a voting response instead of a heartbeat response")
-                    }
+        if let Ok(response) = send_heartbeat(address, request.clone()).await {
+            match response {
+                RaftManagementResponse::HeartbeatAddOne { max_received } => {todo!("Not implemented add-one responses")},
+                RaftManagementResponse::HeartbeatOk { max_received, current_term } => {
+                    max_recieved_members.push(max_received);
+                },
+                RaftManagementResponse::HeartbeatRejected { current_term } => {
+                    state.current_term = state.current_term.max(current_term);
                 }
+                _ => panic!("Received a voting response instead of a heartbeat response")
             }
         }
     }
+
     max_recieved_members.push(c.max_received);
     let loc = max_recieved_members.len() / 2 - 1;
 
@@ -491,5 +455,23 @@ pub async fn send_global_heartbeat(core: Arc<RwLock<RaftCore>>, log: Arc<RwLock<
         c.max_committed = *median;
     }
 
-    return state.current_term.max(c.current_term);
+    return Ok(state.current_term.max(c.current_term));
+}
+
+pub async fn send_heartbeat(address: SocketAddr, request: RaftManagementRequest) -> Result<RaftManagementResponse, Error> {
+    let mut stream = TcpStream::connect(address).await?;
+    request.send_over_tcp_and_shutdown(&mut stream).await?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let response = serde_json::from_slice(&buf)?;
+    return Ok(response);
+}
+
+pub async fn send_vote_request(address: SocketAddr, request: RaftManagementRequest) -> Result<RaftManagementResponse, Error> {
+    let mut stream = TcpStream::connect(address).await?;
+    request.send_over_tcp_and_shutdown(&mut stream).await?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let response = serde_json::from_slice(&buf)?;
+    return Ok(response);
 }
