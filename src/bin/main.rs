@@ -1,17 +1,14 @@
 use std::net::SocketAddr;
 use std::env;
 use std::str::FromStr;
-use std::sync::mpsc::channel;
 use std::time::SystemTime;
 use bytes::Bytes;
-use form_urlencoded::parse;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::body::Frame;
 use hyper::server::conn::http1;
 
 use hyper::service::service_fn;
 use hyper::{body::Body, Method, Request, Response, StatusCode};
-use hyper_util::server::conn::auto::Http1Builder;
 use tokio::net::TcpListener;
 use hyper_util::rt::TokioIo;
 
@@ -22,11 +19,7 @@ use serde::{Serialize, Deserialize};
 use flashmap;
 use seafoam::*; 
 
-async fn bar(req: Request<hyper::body::Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-    return Ok(Response::new(full("")));
-}
-
-async fn echo(
+async fn kv_store(
      req: Request<hyper::body::Incoming>, reader: flashmap::ReadHandle<String, Data>, v: Arc<RwLock<Vec<LogEntry>>>, state: watch::Receiver<RaftState>
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     match (req.method(), req.uri().path()) {
@@ -85,25 +78,20 @@ async fn echo(
                                 let st = serde_json::to_string(&Req::SOk { in_reply_to: msg_id }).unwrap();
                                 frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
                             }
-                            RaftState::Follower(term, addr, _) => {
+                            RaftState::Follower(_, addr, _) => {
                                 if let Some(addr) = addr {
                                     resp = resp.header("Location", "http://".to_owned() + &addr.to_string() + "/set")
                                     .status(307);
                                     frame = Bytes::new();
                                 }
                                 else{
-                                    let st = serde_json::to_string(&Req::SOk { in_reply_to: msg_id }).unwrap();
-                                    frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                                    resp = resp.status(500);
+                                    frame = Bytes::new();
                                 }
                             },
-                            RaftState::Canidate(term) =>{
-                                tokio::task::spawn(async move {
-                                    let mut writer = v.write().await;
-                                    let size = writer.len() + 1;
-                                    writer.push(LogEntry::Insert { key: key, data: value, index: size, term: term })
-                                });
-                                let st = serde_json::to_string(&Req::SOk { in_reply_to: msg_id }).unwrap();
-                                frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                            RaftState::Canidate(_) =>{
+                                resp = resp.status(500);
+                                frame = Bytes::new();
                             }
                         }
                     }
@@ -155,15 +143,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on http://{}", addr);
     
-    let (mut writer, reader) = flashmap::new();
+    let (writer, reader) = flashmap::new();
 
     let l = log.clone();
     let i = internal_state.clone();
-    let w = tokio::task::spawn( async move { 
+    let _ = tokio::task::spawn( async move { 
         log_manager(l, writer, i.clone()).await
     });
+
     let s = state_receiver.clone();
     tokio::task::spawn(raft_state_manager(s, state_sender, internal_state.clone(), log.clone(), args[2].parse::<u16>().unwrap()));
+    
     loop {
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
@@ -171,15 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let new_reader = reader.clone();
         let v = log.clone();
         let s = state_receiver.clone();
-        let service = service_fn(move |x|{
-            let l = v.clone();
-            let r = new_reader.clone();
-            let s = s.clone();
-            async move{
-                let a = echo( x, r, l, s).await;
-                a
-            }
-        });
+        let service = service_fn(move |req: Request<hyper::body::Incoming>| kv_store(req, new_reader.clone(), v.clone(), s.clone()));
         let http = http1::Builder::new();
         tokio::task::spawn(async move {
             if let Err(err) = http
