@@ -1,6 +1,5 @@
 use futures_util::{future::poll_fn, Future, FutureExt};
 use http::{request, response};
-use hyper::rt::Timer;
 use serde::{Serialize, Deserialize};
 use core::time;
 use std::{any::Any, arch::x86_64::CpuidResult, array, collections::{hash_map::RandomState, BTreeMap, HashMap, HashSet}, ops::Add, process::Output, task::Poll, thread::{current, spawn}, time::{Duration, SystemTime}, usize::MIN};
@@ -112,12 +111,12 @@ pub enum RaftManagementResponse{
     HeartbeatAddOne{
         max_received: usize
     },
-    VoteOk{
-
-    },
     VoteRejected{
         current_term: usize,
         max_received: usize
+    },
+    VoteOk{
+
     }
 }
 
@@ -213,7 +212,7 @@ async fn handle_management_request(mut socket: &mut TcpStream, core: Arc<RwLock<
                         let last_match = l.get(latest_sent.get_index() - 1).cloned();
                         if let Some(last_match) = last_match {
                             if latest_sent !=  last_match { // latest_sent did not equal the same spot in current log, need to add-one
-                                let response = RaftManagementResponse::HeartbeatAddOne { max_received: old_received };
+                                let response = RaftManagementResponse::HeartbeatAddOne { max_received: latest_sent.get_index() - 1 };
                                 eprintln!("Responding with {:?}", response);
                                 response.send_over_tcp_and_shutdown(&mut socket).await;
                             }
@@ -230,7 +229,7 @@ async fn handle_management_request(mut socket: &mut TcpStream, core: Arc<RwLock<
                             }
                         }
                         else { // The entry did not have a corresponding match, need to call for a heartbeat add-one
-                            let response = RaftManagementResponse::HeartbeatAddOne { max_received: old_received };
+                            let response = RaftManagementResponse::HeartbeatAddOne { max_received: (old_received - 1).min(0) };
                             eprintln!("Responding with {:?}", response);
                             response.send_over_tcp_and_shutdown(&mut socket).await;
                         }
@@ -458,30 +457,43 @@ pub async fn send_global_heartbeat(core: Arc<RwLock<RaftCore>>, log: Arc<RwLock<
         if let Ok(mut response) = send_heartbeat(address, request.clone()).await {
             match response {
                 RaftManagementResponse::HeartbeatAddOne { max_received } => {
-                    eprintln!("heartbeat add-one");
-                    while let RaftManagementResponse::HeartbeatAddOne { max_received } = response {
-                        //todo!("not finished add-one");
-                        eprintln!("Add-one triggered");
-                        if let RaftManagementRequest::Heartbeat { latest_sent, current_term, commit_to, log_entries, address } = request.clone() {
-                            let l = log.read().await;
-                            let mut new_last = None;
-                            let mut new_logs = Vec::new();
-                            if let Some(last) = latest_sent {
-                                new_last = l.get(last.get_index() - 3).cloned();
-                            }
-                            if let Some(last) = new_last.clone() {
-                                new_logs = l.clone().into_iter().filter(|x| {
-                                    x.get_index() >= last.get_index()
-                                }).collect();
-                            }
-                            let new_request = RaftManagementRequest::Heartbeat { latest_sent: new_last, current_term: current_term, commit_to: commit_to, log_entries: new_logs, address: address };
-                            let mut socket = TcpStream::connect(address).await.unwrap();
-                            new_request.send_over_tcp_and_shutdown(&mut socket).await.unwrap();
-                            let mut buff = Vec::new();
-                            socket.read_to_end(&mut buff).await;
-                            response = serde_json::from_slice(&buff).unwrap();
-                        }
-                    }
+                    let l = log.clone();
+                    let request = RaftManagementRequest::Heartbeat { latest_sent: None, current_term: state.current_term, commit_to: state.max_committed, log_entries: l.read().await.clone(), address: c.address };
+                    send_heartbeat(address, request.clone()).await;
+                    // eprintln!("heartbeat add-one");
+                    // let mut should_break = false;
+                    // while let RaftManagementResponse::HeartbeatAddOne { max_received } = response {
+                    //     if max_received == 0 {
+                    //         if should_break {
+                    //             break;
+                    //         }
+                    //         should_break = true;
+                    //         continue;
+                    //     }
+                    //     //todo!("not finished add-one");
+                    //     eprintln!("Add-one triggered");
+                    //     if let RaftManagementRequest::Heartbeat { latest_sent, current_term, commit_to, log_entries, address } = request.clone() {
+                    //         let l = log.read().await;
+                    //         let new_last = l.get(max_received - 2).cloned();
+                    //         let mut new_logs = Vec::new();
+                            
+                    //         if let Some(last) = new_last.clone() {
+                    //             new_logs = l.clone().into_iter().filter(|x| {
+                    //                 x.get_index() >= last.get_index()
+                    //             }).collect();
+                    //         }
+                    //         else {
+                    //             new_logs = l.clone();
+                    //         }
+
+                    //         let new_request = RaftManagementRequest::Heartbeat { latest_sent: new_last, current_term: current_term, commit_to: commit_to, log_entries: new_logs, address: address };
+                    //         let mut socket = TcpStream::connect(address).await.unwrap();
+                    //         new_request.send_over_tcp_and_shutdown(&mut socket).await.unwrap();
+                    //         let mut buff = Vec::new();
+                    //         socket.read_to_end(&mut buff).await;
+                    //         response = serde_json::from_slice(&buff).unwrap_or(RaftManagementResponse::HeartbeatAddOne { max_received: (max_received - 1).min(0) });
+                    //     }
+                    // }
                 },
                 RaftManagementResponse::HeartbeatOk { max_received, current_term } => {
                     eprintln!("heartbeat ok");
