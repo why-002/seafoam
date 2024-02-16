@@ -11,6 +11,8 @@ use tokio::net::{TcpListener};
 use anyhow::Error;
 use rand::prelude::*;
 
+mod test;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Data{
@@ -207,7 +209,7 @@ async fn handle_management_request(mut socket: &mut TcpStream, core: Arc<RwLock<
                     let new_received: usize;
 
                     let mut l = log.write().await;
-                    
+                    // Pull out into its own function, handle the log, getting stuff from it, and sending outside of it
                     if let Some(latest_sent) = latest_sent {
                         let last_match = l.get(latest_sent.get_index() - 1).cloned();
                         if let Some(last_match) = last_match {
@@ -254,7 +256,7 @@ async fn handle_management_request(mut socket: &mut TcpStream, core: Arc<RwLock<
                     eprintln!("Accepted heartbeat");
                 },
                 RaftManagementRequest::RequestVote { current_term, max_received } => {
-                    let mut c = core.write().await;
+                    let c = core.read().await;
                     eprintln!("responding to vote");
                     let response = RaftManagementResponse::VoteRejected { current_term: c.current_term, max_received: c.max_received };
                     if current_term <= c.last_voted {
@@ -267,6 +269,8 @@ async fn handle_management_request(mut socket: &mut TcpStream, core: Arc<RwLock<
                         response.send_over_tcp_and_shutdown(&mut socket).await;
                     }
                     else {
+                        drop(c);
+                        let mut c = core.write().await;
                         c.current_term = current_term;
                         c.last_voted = current_term;
                         let response = RaftManagementResponse::VoteOk {  };
@@ -276,9 +280,6 @@ async fn handle_management_request(mut socket: &mut TcpStream, core: Arc<RwLock<
             }
 }
 
-
-// Fix the response logic for heartbeats and maybe votes too
-// Heartbeats need to accurately replicate taking in heartbeat AddOnes
 pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_updater: watch::Sender<RaftState>, core: Arc<RwLock<RaftCore>>, log: Arc<RwLock<Vec<LogEntry>>>, port: u16) -> Result<(), std::io::Error> {
     let addr = SocketAddr::from(([0,0,0,0], port));
     let listener = TcpListener::bind(addr).await?;
@@ -365,10 +366,10 @@ pub async fn raft_state_manager(state_ref: watch::Receiver<RaftState>, state_upd
                     }
                     else{
                         state_updater.send(RaftState::Follower(term, addr, false));
+                        drop(state_updater);
+                        let r = (random::<u64>() % 200) + 300;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(r)).await;
                     }
-                    drop(state_updater);
-                    let r = (random::<u64>() % 200) + 300;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(r)).await;
                 }
             }
         }
@@ -436,9 +437,8 @@ pub async fn send_global_heartbeat(core: Arc<RwLock<RaftCore>>, log: Arc<RwLock<
         return Ok(c.current_term);
     }
 
-    let new_logs = l.clone().into_iter().filter(|x| {
-        x.get_index() > c.max_received
-    }).collect::<Vec<LogEntry>>();
+    let new_logs = l.clone().into_iter().filter(|x| x.get_index() > c.max_received )
+        .collect::<Vec<LogEntry>>();
 
     let last = l.get(c.max_received - 1).cloned();
 
