@@ -30,8 +30,6 @@ use tokio::{
     },
 };
 
-mod test;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum Data {
@@ -209,6 +207,43 @@ pub async fn log_manager(
     }
 }
 
+fn generate_heartbeat_response(
+    latest_sent: Option<LogEntry>,
+    last_match: Option<LogEntry>,
+    old_received: usize,
+    current_term: usize,
+    last: Option<LogEntry>,
+) -> RaftManagementResponse {
+    let mut new_received = old_received;
+    if let Some(last) = last {
+        new_received = last.get_index();
+    }
+
+    let mut response = RaftManagementResponse::HeartbeatOk {
+        max_received: new_received,
+        current_term: current_term,
+    };
+
+    if let Some(latest_sent) = latest_sent {
+        if let Some(last_match) = last_match {
+            if latest_sent != last_match {
+                // latest_sent did not equal the same spot in current log, need to add-one
+                response = RaftManagementResponse::HeartbeatAddOne {
+                    max_received: latest_sent.get_index() - 1,
+                };
+                eprintln!("Responding with {:?}", response);
+            }
+        } else {
+            // The entry did not have a corresponding match, need to call for a heartbeat add-one
+            response = RaftManagementResponse::HeartbeatAddOne {
+                max_received: latest_sent.get_index() - 1,
+            };
+        }
+    }
+
+    return response;
+}
+
 async fn handle_management_request(
     mut socket: &mut TcpStream,
     core: Arc<RwLock<RaftCore>>,
@@ -264,68 +299,33 @@ async fn handle_management_request(
                 drop(c);
             }
 
-            let new_received: usize;
-
             let mut l = log.write().await;
-            // Pull out into its own function, handle the log, getting stuff from it, and sending outside of it
-            if let Some(latest_sent) = latest_sent {
-                let last_match = l.get(latest_sent.get_index() - 1).cloned();
-                if let Some(last_match) = last_match {
-                    if latest_sent != last_match {
-                        // latest_sent did not equal the same spot in current log, need to add-one
-                        let response = RaftManagementResponse::HeartbeatAddOne {
-                            max_received: latest_sent.get_index() - 1,
-                        };
-                        eprintln!("Responding with {:?}", response);
-                        response.send_over_tcp_and_shutdown(&mut socket).await;
-                    } else {
-                        // They did match at that location, drain and then append
-                        l.drain(latest_sent.get_index()..);
-                        l.append(&mut log_entries);
-                        let new_received = l.len();
-                        let mut c = core.write().await;
-                        c.max_received = new_received;
-                        c.max_committed = commit_to;
-                        let response = RaftManagementResponse::HeartbeatOk {
-                            max_received: new_received,
-                            current_term: current_term,
-                        };
-                        eprintln!("Responding with {:?}", response);
-                        response.send_over_tcp_and_shutdown(&mut socket).await;
+
+            let response = generate_heartbeat_response(
+                latest_sent.clone(),
+                l.last().cloned(),
+                old_received,
+                current_term,
+                log_entries.last().cloned(),
+            );
+
+            match &response {
+                &RaftManagementResponse::HeartbeatOk {
+                    max_received,
+                    current_term: _,
+                } => {
+                    if let Some(la) = latest_sent {
+                        l.drain(la.get_index()..);
                     }
-                } else {
-                    // The entry did not have a corresponding match, need to call for a heartbeat add-one
-                    let response = RaftManagementResponse::HeartbeatAddOne {
-                        max_received: (old_received - 1).min(0),
-                    };
-                    eprintln!("Responding with {:?}", response);
-                    response.send_over_tcp_and_shutdown(&mut socket).await;
-                }
-            } else {
-                // There are no entries that have been sent in the past, this should cause a complete rewrite of log
-                if let Some(last) = log_entries.last() {
-                    // Leader is sending at least 1 entry
-                    new_received = last.get_index();
                     l.append(&mut log_entries);
                     let mut c = core.write().await;
-                    c.max_received = new_received;
+                    c.max_received = max_received;
                     c.max_committed = commit_to;
-                    let response = RaftManagementResponse::HeartbeatOk {
-                        max_received: new_received,
-                        current_term: current_term,
-                    };
-                    eprintln!("Responding with {:?}", response);
-                    response.send_over_tcp_and_shutdown(&mut socket).await;
-                } else {
-                    // heartbeat is empty
-                    let response = RaftManagementResponse::HeartbeatOk {
-                        max_received: old_received,
-                        current_term: current_term,
-                    };
-                    eprintln!("Responding with {:?}", response);
-                    response.send_over_tcp_and_shutdown(&mut socket).await;
                 }
+                _ => {}
             }
+
+            response.send_over_tcp_and_shutdown(socket).await;
             eprintln!("Accepted heartbeat");
         }
         RaftManagementRequest::RequestVote {
