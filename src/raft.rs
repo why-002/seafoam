@@ -1,72 +1,25 @@
 use anyhow::Error;
-use core::time;
 use flashmap::{self, new};
-use futures_util::{future::poll_fn, Future, FutureExt};
-use http::{request, response};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::{
-    any::Any,
-    arch::x86_64::CpuidResult,
-    array,
-    collections::{hash_map::RandomState, BTreeMap, HashMap, HashSet},
-    ops::Add,
-    process::Output,
-    task::Poll,
-    thread::{current, spawn},
-    time::{Duration, SystemTime},
-    usize::MIN,
-};
+use std::time::SystemTime;
 use tokio::net::TcpListener;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncReadExt,
     net::TcpStream,
     sync::{
-        mpsc::{self, *},
         watch::{self, *},
         RwLock,
     },
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
-pub enum Data {
-    String(String),
-    Int(u32),
-    Array(Vec<Data>),
-    Map(HashMap<String, Data>),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum LogEntry {
-    Insert {
-        key: String,
-        data: Data,
-        index: usize,
-        term: usize,
-    },
-    Delete {
-        key: String,
-        index: usize,
-        term: usize,
-    },
-}
-
-impl LogEntry {
-    pub fn get_index(&self) -> usize {
-        match self {
-            LogEntry::Insert {
-                key,
-                data,
-                index,
-                term,
-            } => *index,
-            LogEntry::Delete { key, index, term } => *index,
-        }
-    }
-}
+mod data;
+mod requests;
+pub use self::data::{Data, LogEntry};
+use self::requests::{send_heartbeat, send_vote_request};
+use self::requests::{RaftManagementRequest, RaftManagementResponse};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum RaftState {
@@ -83,58 +36,6 @@ pub struct RaftCore {
     pub members: Vec<SocketAddr>,
     pub address: SocketAddr,
     pub last_voted: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RaftManagementRequest {
-    Heartbeat {
-        latest_sent: Option<LogEntry>,
-        current_term: usize,
-        commit_to: usize,
-        log_entries: Vec<LogEntry>,
-        address: SocketAddr,
-    },
-    RequestVote {
-        current_term: usize,
-        max_received: usize,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RaftManagementResponse {
-    HeartbeatOk {
-        max_received: usize,
-        current_term: usize,
-    },
-    HeartbeatRejected {
-        current_term: usize,
-    },
-    HeartbeatAddOne {
-        max_received: usize,
-    },
-    VoteRejected {
-        current_term: usize,
-        max_received: usize,
-    },
-    VoteOk {},
-}
-
-impl RaftManagementRequest {
-    async fn send_over_tcp_and_shutdown(&self, socket: &mut TcpStream) -> Result<(), Error> {
-        let response = serde_json::to_vec(&self)?;
-        socket.write_all(&response).await?;
-        socket.shutdown().await?;
-        Ok(())
-    }
-}
-
-impl RaftManagementResponse {
-    async fn send_over_tcp_and_shutdown(&self, socket: &mut TcpStream) -> Result<(), Error> {
-        let response = serde_json::to_vec(&self)?;
-        socket.write_all(&response).await?;
-        socket.shutdown().await?;
-        Ok(())
-    }
 }
 
 pub async fn log_manager(
@@ -454,7 +355,7 @@ pub async fn raft_state_manager(
 }
 
 // TODO: use is_finished() on spawned threads in order to do async, probably write a threadpool struct
-pub async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
+async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
     let mut c = core.write().await;
     if c.last_voted >= c.current_term {
         c.current_term = c.last_voted;
@@ -495,7 +396,7 @@ pub async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
 
 //TODO: rewrite so the heartbeats are not sync with each other
 // Rewrite so it loops sending lower lasts until it succeded (requires them to be async from each other)
-pub async fn send_global_heartbeat(
+async fn send_global_heartbeat(
     core: Arc<RwLock<RaftCore>>,
     log: Arc<RwLock<Vec<LogEntry>>>,
 ) -> Result<usize, Error> {
@@ -611,38 +512,4 @@ pub async fn send_global_heartbeat(
     }
 
     return Ok(state.current_term.max(c.current_term));
-}
-
-pub async fn send_heartbeat(
-    address: SocketAddr,
-    request: RaftManagementRequest,
-) -> Result<RaftManagementResponse, Error> {
-    let result = tokio::time::timeout(Duration::from_millis(75), async {
-        let mut stream = TcpStream::connect(address).await?;
-        request.send_over_tcp_and_shutdown(&mut stream).await?;
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await?;
-        let response: RaftManagementResponse = serde_json::from_slice(&buf)?;
-        return Ok(response);
-    })
-    .await?;
-
-    return result;
-}
-
-pub async fn send_vote_request(
-    address: SocketAddr,
-    request: RaftManagementRequest,
-) -> Result<RaftManagementResponse, Error> {
-    let result = tokio::time::timeout(Duration::from_millis(75), async {
-        let mut stream = TcpStream::connect(address).await?;
-        request.send_over_tcp_and_shutdown(&mut stream).await?;
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await?;
-        let response: RaftManagementResponse = serde_json::from_slice(&buf)?;
-        return Ok(response);
-    })
-    .await?;
-
-    return result;
 }
