@@ -1,4 +1,3 @@
-use flashmap::{self, new};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -31,12 +30,16 @@ impl LogEntry {
     pub fn get_index(&self) -> usize {
         match self {
             LogEntry::Insert {
-                key,
-                data,
+                key: _,
+                data: _,
                 index,
-                term,
+                term: _,
             } => *index,
-            LogEntry::Delete { key, index, term } => *index,
+            LogEntry::Delete {
+                key: _,
+                index,
+                term: _,
+            } => *index,
         }
     }
 }
