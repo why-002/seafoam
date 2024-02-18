@@ -114,7 +114,6 @@ pub async fn raft_state_manager(
                         drop(state_updater);
                     }
                     eprintln!("Lost Election");
-
                     let r = (random::<u64>() % 200) + 300;
                     tokio::time::sleep(tokio::time::Duration::from_millis(r)).await;
                 }

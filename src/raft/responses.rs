@@ -8,7 +8,7 @@ use tokio::{
 
 use super::{Arc, LogEntry, RaftCore, RaftManagementRequest, RaftState, RwLock};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum RaftManagementResponse {
     HeartbeatOk {
         max_received: usize,
@@ -36,6 +36,7 @@ impl RaftManagementResponse {
     }
 }
 
+// Consider refactoring the heartbeat rejection to also be in generate_heartbeat_response
 pub async fn handle_management_request(
     mut socket: &mut TcpStream,
     core: Arc<RwLock<RaftCore>>,
@@ -146,13 +147,13 @@ pub async fn handle_management_request(
 
 fn generate_heartbeat_response(
     latest_sent: Option<LogEntry>,
-    last_match: Option<LogEntry>,
+    latest_match: Option<LogEntry>,
     old_received: usize,
     current_term: usize,
-    last: Option<LogEntry>,
+    message_last_entry: Option<LogEntry>,
 ) -> RaftManagementResponse {
     let mut new_received = old_received;
-    if let Some(last) = last {
+    if let Some(last) = message_last_entry {
         new_received = last.get_index();
     }
 
@@ -161,7 +162,7 @@ fn generate_heartbeat_response(
         current_term: current_term,
     };
 
-    match (latest_sent, last_match) {
+    match (latest_sent, latest_match) {
         (Some(x), Some(y)) => {
             if x != y {
                 // latest_sent did not equal the same spot in current log, need to add-one
@@ -202,5 +203,232 @@ fn generate_vote_response(
         return response;
     } else {
         return RaftManagementResponse::VoteOk {};
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::raft::{responses::generate_vote_response, Data, LogEntry, RaftManagementResponse};
+
+    use super::generate_heartbeat_response;
+    #[test]
+    fn heartbeat_okay_none() {
+        let latest_sent = None;
+        let latest_match = None;
+        let old_received = 1;
+        let current_term = 1;
+        let message_last_entry = None;
+        assert_eq!(
+            generate_heartbeat_response(
+                latest_sent,
+                latest_match,
+                old_received,
+                current_term,
+                message_last_entry,
+            ),
+            RaftManagementResponse::HeartbeatOk {
+                max_received: 1,
+                current_term: 1
+            }
+        );
+    }
+    #[test]
+    fn heartbeat_okay_some() {
+        let latest_sent = Some(LogEntry::Insert {
+            key: "foo".to_string(),
+            data: Data::String("Bar".to_string()),
+            index: 2,
+            term: 1,
+        });
+        let latest_match = latest_sent.clone();
+        let old_received = 1;
+        let current_term = 1;
+        let message_last_entry = latest_sent.clone();
+        assert_eq!(
+            generate_heartbeat_response(
+                latest_sent,
+                latest_match,
+                old_received,
+                current_term,
+                message_last_entry,
+            ),
+            RaftManagementResponse::HeartbeatOk {
+                max_received: 2,
+                current_term: 1
+            }
+        );
+    }
+    #[test]
+    fn heartbeat_last_set_received() {
+        let latest_sent = Some(LogEntry::Insert {
+            key: "foo".to_string(),
+            data: Data::String("Bar".to_string()),
+            index: 2,
+            term: 1,
+        });
+        let latest_match = latest_sent.clone();
+        let old_received = 1;
+        let current_term = 1;
+        let message_last_entry = Some(LogEntry::Insert {
+            key: "foo".to_string(),
+            data: Data::String("Bar".to_string()),
+            index: 3,
+            term: 1,
+        });
+        assert_eq!(
+            generate_heartbeat_response(
+                latest_sent,
+                latest_match,
+                old_received,
+                current_term,
+                message_last_entry,
+            ),
+            RaftManagementResponse::HeartbeatOk {
+                max_received: 3,
+                current_term: 1
+            }
+        );
+    }
+    #[test]
+    fn heartbeat_match_is_none() {
+        let latest_sent = Some(LogEntry::Insert {
+            key: "foo".to_string(),
+            data: Data::String("Bar".to_string()),
+            index: 2,
+            term: 1,
+        });
+        let latest_match = None;
+        let old_received = 1;
+        let current_term = 1;
+        let message_last_entry = Some(LogEntry::Insert {
+            key: "foo".to_string(),
+            data: Data::String("Bar".to_string()),
+            index: 3,
+            term: 1,
+        });
+        assert_eq!(
+            generate_heartbeat_response(
+                latest_sent,
+                latest_match,
+                old_received,
+                current_term,
+                message_last_entry,
+            ),
+            RaftManagementResponse::HeartbeatAddOne { max_received: 1 }
+        );
+    }
+    #[test]
+    fn heartbeat_match_not_equal() {
+        let latest_sent = Some(LogEntry::Insert {
+            key: "foo".to_string(),
+            data: Data::String("Bar".to_string()),
+            index: 2,
+            term: 1,
+        });
+        let latest_match = Some(LogEntry::Insert {
+            key: "fo".to_string(),
+            data: Data::String("Bar".to_string()),
+            index: 2,
+            term: 1,
+        });
+        let old_received = 1;
+        let current_term = 1;
+        let message_last_entry = Some(LogEntry::Insert {
+            key: "foo".to_string(),
+            data: Data::String("Bar".to_string()),
+            index: 3,
+            term: 1,
+        });
+        assert_eq!(
+            generate_heartbeat_response(
+                latest_sent,
+                latest_match,
+                old_received,
+                current_term,
+                message_last_entry,
+            ),
+            RaftManagementResponse::HeartbeatAddOne { max_received: 1 }
+        );
+    }
+    #[test]
+    fn vote_okay() {
+        let c_current_term = 5;
+        let c_max_received = 1;
+        let c_last_voted = 5;
+        let current_term = 6;
+        let max_received = 1;
+        assert_eq!(
+            generate_vote_response(
+                c_current_term,
+                c_max_received,
+                c_last_voted,
+                current_term,
+                max_received
+            ),
+            RaftManagementResponse::VoteOk {}
+        );
+    }
+    #[test]
+    fn term_too_low() {
+        let c_current_term = 5;
+        let c_max_received = 1;
+        let c_last_voted = 5;
+        let current_term = 5; // Term needs to be at least one higher in order to be voted for
+        let max_received = 1;
+        assert_eq!(
+            generate_vote_response(
+                c_current_term,
+                c_max_received,
+                c_last_voted,
+                current_term,
+                max_received
+            ),
+            RaftManagementResponse::VoteRejected {
+                current_term: c_current_term,
+                max_received: c_max_received
+            }
+        );
+    }
+    #[test]
+    fn received_too_low() {
+        let c_current_term = 5;
+        let c_max_received = 1;
+        let c_last_voted = 5;
+        let current_term = 6;
+        let max_received = 0; // Needs to have received at least as many messages in order to be a valid canidate
+        assert_eq!(
+            generate_vote_response(
+                c_current_term,
+                c_max_received,
+                c_last_voted,
+                current_term,
+                max_received
+            ),
+            RaftManagementResponse::VoteRejected {
+                current_term: c_current_term,
+                max_received: c_max_received
+            }
+        );
+    }
+    #[test]
+    fn not_first_to_request_vote() {
+        let c_current_term = 5;
+        let c_max_received = 1;
+        let c_last_voted = 6; // Needs to be the first to request a vote in a given election
+        let current_term = 6;
+        let max_received = 1;
+        assert_eq!(
+            generate_vote_response(
+                c_current_term,
+                c_max_received,
+                c_last_voted,
+                current_term,
+                max_received
+            ),
+            RaftManagementResponse::VoteRejected {
+                current_term: c_current_term,
+                max_received: c_max_received
+            }
+        );
     }
 }
