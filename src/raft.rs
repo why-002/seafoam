@@ -92,10 +92,12 @@ pub async fn raft_state_manager(
         let state_ref_copy = state_ref_copy;
         let state_copy = state_copy;
         loop {
+            let state_ref_copy = state_ref_copy.clone();
             let state = state_ref_copy.borrow().clone();
             match state {
                 RaftState::Canidate(term) => {
                     let won_election = run_election(core_copy.clone()).await;
+                    let current_state = state_ref_copy.borrow().clone();
                     eprintln!("Finished election");
                     if let Ok(true) = won_election {
                         eprintln!("won");
@@ -103,21 +105,18 @@ pub async fn raft_state_manager(
                         state_updater.send(RaftState::Leader(term));
                         eprintln!("State is {:?}. Changing to Leader", state);
                         continue;
-                    } else {
+                    } else if let RaftState::Canidate(_) = current_state {
                         let state_updater = state_copy.write().await;
-                        let current_state = state_updater.borrow().to_owned();
-                        if let RaftState::Canidate(_) = current_state {
-                            let mut c = core_copy.write().await;
-                            c.current_term += 1;
-                            let term = c.current_term;
-                            state_updater.send(RaftState::Canidate(term));
-                        }
-
-                        eprintln!("Lost Election");
+                        let mut c = core_copy.write().await;
+                        c.current_term += 1;
+                        let term = c.current_term;
+                        state_updater.send(RaftState::Canidate(term));
                         drop(state_updater);
-                        let r = (random::<u64>() % 200) + 300;
-                        tokio::time::sleep(tokio::time::Duration::from_millis(r)).await;
                     }
+                    eprintln!("Lost Election");
+
+                    let r = (random::<u64>() % 200) + 300;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(r)).await;
                 }
                 RaftState::Leader(term) => {
                     let state_updater = state_copy.write().await;
