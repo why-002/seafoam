@@ -1,15 +1,14 @@
+use crate::LogEntry;
 use anyhow::Error;
-use flashmap::{self, new};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::watch::{self, *},
 };
 
-use crate::LogEntry;
+use super::RaftManagementResponse;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RaftManagementRequest {
@@ -27,34 +26,6 @@ pub enum RaftManagementRequest {
 }
 
 impl RaftManagementRequest {
-    pub async fn send_over_tcp_and_shutdown(&self, socket: &mut TcpStream) -> Result<(), Error> {
-        let response = serde_json::to_vec(&self)?;
-        socket.write_all(&response).await?;
-        socket.shutdown().await?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum RaftManagementResponse {
-    HeartbeatOk {
-        max_received: usize,
-        current_term: usize,
-    },
-    HeartbeatRejected {
-        current_term: usize,
-    },
-    HeartbeatAddOne {
-        max_received: usize,
-    },
-    VoteRejected {
-        current_term: usize,
-        max_received: usize,
-    },
-    VoteOk {},
-}
-
-impl RaftManagementResponse {
     pub async fn send_over_tcp_and_shutdown(&self, socket: &mut TcpStream) -> Result<(), Error> {
         let response = serde_json::to_vec(&self)?;
         socket.write_all(&response).await?;

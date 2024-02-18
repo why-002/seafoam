@@ -1,42 +1,23 @@
 use anyhow::Error;
-use flashmap::{self, new};
+use flashmap::{self};
 use rand::prelude::*;
-use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::net::TcpListener;
-use tokio::{
-    io::AsyncReadExt,
-    net::TcpStream,
-    sync::{
-        watch::{self, *},
-        RwLock,
-    },
+use tokio::sync::{
+    watch::{self},
+    RwLock,
 };
 
 mod data;
 mod requests;
-pub use self::data::{Data, LogEntry};
+mod responses;
+pub use self::data::{Data, LogEntry, RaftCore, RaftState};
+pub use self::requests::RaftManagementRequest;
 use self::requests::{send_heartbeat, send_vote_request};
-use self::requests::{RaftManagementRequest, RaftManagementResponse};
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum RaftState {
-    Leader(usize),
-    Canidate(usize),
-    Follower(usize, Option<SocketAddr>, bool),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RaftCore {
-    pub max_committed: usize,
-    pub max_received: usize,
-    pub current_term: usize,
-    pub members: Vec<SocketAddr>,
-    pub address: SocketAddr,
-    pub last_voted: usize,
-}
+use self::responses::handle_management_request;
+pub use self::responses::RaftManagementResponse;
 
 pub async fn log_manager(
     log: Arc<RwLock<Vec<LogEntry>>>,
@@ -70,168 +51,23 @@ pub async fn log_manager(
                     LogEntry::Insert {
                         key,
                         data,
-                        index,
-                        term,
+                        index: _,
+                        term: _,
                     } => {
                         if key == "foo" {
                             eprintln!("logged foo at: {:?}", SystemTime::now());
                         }
                         write_guard.insert(key, data)
                     }
-                    LogEntry::Delete { key, index, term } => write_guard.remove(key),
+                    LogEntry::Delete {
+                        key,
+                        index: _,
+                        term: _,
+                    } => write_guard.remove(key),
                 };
             }
             write_guard.publish();
             current_index = new_index.min(log_handle.len());
-        }
-    }
-}
-
-fn generate_heartbeat_response(
-    latest_sent: Option<LogEntry>,
-    last_match: Option<LogEntry>,
-    old_received: usize,
-    current_term: usize,
-    last: Option<LogEntry>,
-) -> RaftManagementResponse {
-    let mut new_received = old_received;
-    if let Some(last) = last {
-        new_received = last.get_index();
-    }
-
-    let mut response = RaftManagementResponse::HeartbeatOk {
-        max_received: new_received,
-        current_term: current_term,
-    };
-
-    if let Some(latest_sent) = latest_sent {
-        if let Some(last_match) = last_match {
-            if latest_sent != last_match {
-                // latest_sent did not equal the same spot in current log, need to add-one
-                response = RaftManagementResponse::HeartbeatAddOne {
-                    max_received: latest_sent.get_index() - 1,
-                };
-                eprintln!("Responding with {:?}", response);
-            }
-        } else {
-            // The entry did not have a corresponding match, need to call for a heartbeat add-one
-            response = RaftManagementResponse::HeartbeatAddOne {
-                max_received: latest_sent.get_index() - 1,
-            };
-        }
-    }
-
-    return response;
-}
-
-async fn handle_management_request(
-    mut socket: &mut TcpStream,
-    core: Arc<RwLock<RaftCore>>,
-    state_owner: Arc<RwLock<watch::Sender<RaftState>>>,
-    log: Arc<RwLock<Vec<LogEntry>>>,
-) {
-    let mut buf = Vec::new();
-    socket
-        .read_to_end(&mut buf)
-        .await
-        .expect("Failed to read message from socket");
-    let req = serde_json::from_slice(&buf).expect("Failed to deserialize raft management request");
-
-    match req {
-        //Heartbeat needs to be reworked
-        RaftManagementRequest::Heartbeat {
-            latest_sent,
-            current_term: message_current_term,
-            commit_to,
-            mut log_entries,
-            address,
-        } => {
-            let c = core.read().await;
-
-            if c.current_term > message_current_term {
-                eprintln!(
-                    "Rejected heartbeat, Self: {} Other: {}",
-                    c.current_term, message_current_term
-                );
-                let response = RaftManagementResponse::HeartbeatRejected {
-                    current_term: c.current_term,
-                };
-                response.send_over_tcp_and_shutdown(&mut socket).await;
-                return;
-            }
-
-            let state_updater = state_owner.write().await;
-            state_updater.send(RaftState::Follower(
-                message_current_term,
-                Some(address),
-                true,
-            ));
-            drop(state_updater);
-
-            let old_received = c.max_received;
-            let mut current_term = c.current_term;
-            drop(c);
-
-            if current_term < message_current_term {
-                let mut c = core.write().await;
-                c.current_term = message_current_term;
-                current_term = c.current_term;
-                drop(c);
-            }
-
-            let mut l = log.write().await;
-
-            let response = generate_heartbeat_response(
-                latest_sent.clone(),
-                l.last().cloned(),
-                old_received,
-                current_term,
-                log_entries.last().cloned(),
-            );
-
-            match &response {
-                &RaftManagementResponse::HeartbeatOk {
-                    max_received,
-                    current_term: _,
-                } => {
-                    if let Some(la) = latest_sent {
-                        l.drain(la.get_index()..);
-                    }
-                    l.append(&mut log_entries);
-                    let mut c = core.write().await;
-                    c.max_received = max_received;
-                    c.max_committed = commit_to;
-                }
-                _ => {}
-            }
-
-            response.send_over_tcp_and_shutdown(socket).await;
-            eprintln!("Accepted heartbeat");
-        }
-        RaftManagementRequest::RequestVote {
-            current_term,
-            max_received,
-        } => {
-            let c = core.read().await;
-            eprintln!("responding to vote");
-            let response = RaftManagementResponse::VoteRejected {
-                current_term: c.current_term,
-                max_received: c.max_received,
-            };
-            if current_term <= c.last_voted {
-                response.send_over_tcp_and_shutdown(&mut socket).await;
-            } else if c.current_term > current_term {
-                response.send_over_tcp_and_shutdown(&mut socket).await;
-            } else if c.max_received > max_received {
-                response.send_over_tcp_and_shutdown(&mut socket).await;
-            } else {
-                drop(c);
-                let mut c = core.write().await;
-                c.current_term = current_term;
-                c.last_voted = current_term;
-                let response = RaftManagementResponse::VoteOk {};
-                response.send_over_tcp_and_shutdown(&mut socket).await;
-            }
         }
     }
 }
@@ -259,35 +95,17 @@ pub async fn raft_state_manager(
             let state = state_ref_copy.borrow().clone();
             match state {
                 RaftState::Canidate(term) => {
-                    if let won_election = run_election(core_copy.clone()).await {
-                        eprintln!("Finished election");
-                        if let Ok(true) = won_election {
-                            eprintln!("won");
-                            let state_updater = state_copy.write().await;
-                            state_updater.send(RaftState::Leader(term));
-                            eprintln!("State is {:?}. Changing to Leader", state);
-                            continue;
-                        } else {
-                            let state_updater = state_copy.write().await;
-                            let current_state = state_updater.borrow().to_owned();
-                            match current_state {
-                                RaftState::Canidate(_) => {
-                                    let mut c = core_copy.write().await;
-                                    c.current_term += 1;
-                                    let term = c.current_term;
-                                    state_updater.send(RaftState::Canidate(term));
-                                }
-                                _ => {}
-                            }
-                            eprintln!("Lost Election");
-                            drop(state_updater);
-                            let r = (random::<u64>() % 200) + 300;
-                            tokio::time::sleep(tokio::time::Duration::from_millis(r)).await;
-                        }
-                    } else {
-                        eprintln!("election timed out");
+                    let won_election = run_election(core_copy.clone()).await;
+                    eprintln!("Finished election");
+                    if let Ok(true) = won_election {
+                        eprintln!("won");
                         let state_updater = state_copy.write().await;
-                        let current_state = state_updater.borrow().clone();
+                        state_updater.send(RaftState::Leader(term));
+                        eprintln!("State is {:?}. Changing to Leader", state);
+                        continue;
+                    } else {
+                        let state_updater = state_copy.write().await;
+                        let current_state = state_updater.borrow().to_owned();
                         match current_state {
                             RaftState::Canidate(_) => {
                                 let mut c = core_copy.write().await;
@@ -297,6 +115,7 @@ pub async fn raft_state_manager(
                             }
                             _ => {}
                         }
+                        eprintln!("Lost Election");
                         drop(state_updater);
                         let r = (random::<u64>() % 200) + 300;
                         tokio::time::sleep(tokio::time::Duration::from_millis(r)).await;
