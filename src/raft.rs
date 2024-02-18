@@ -190,21 +190,19 @@ async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
     eprintln!("{:?}", members);
     for address in members {
         // Make request and increment current_votes if it voted for you
-        if let Ok(response) = send_vote_request(address, request.clone()).await {
-            match response {
-                RaftManagementResponse::VoteOk {} => current_votes += 1,
-                RaftManagementResponse::VoteRejected {
-                    current_term,
-                    max_received: _,
-                } => {
-                    eprintln!("Vote was rejected, updating term");
-                    if c.current_term < current_term {
-                        c.current_term = current_term;
-                        return Ok(false);
-                    }
+        match send_vote_request(address, request.clone()).await {
+            Ok(RaftManagementResponse::VoteOk {}) => current_votes += 1,
+            Ok(RaftManagementResponse::VoteRejected {
+                current_term,
+                max_received: _,
+            }) => {
+                eprintln!("Vote was rejected, updating term");
+                if c.current_term < current_term {
+                    c.current_term = current_term;
+                    return Ok(false);
                 }
-                _ => panic!("Received a heartbeat response instead of a vote response"),
             }
+            _ => panic!("Received a heartbeat response instead of a vote response"),
         }
     }
     eprintln!("Votes {}:{}", current_votes, target_votes);
