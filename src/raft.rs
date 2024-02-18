@@ -106,15 +106,13 @@ pub async fn raft_state_manager(
                     } else {
                         let state_updater = state_copy.write().await;
                         let current_state = state_updater.borrow().to_owned();
-                        match current_state {
-                            RaftState::Canidate(_) => {
-                                let mut c = core_copy.write().await;
-                                c.current_term += 1;
-                                let term = c.current_term;
-                                state_updater.send(RaftState::Canidate(term));
-                            }
-                            _ => {}
+                        if let RaftState::Canidate(_) = current_state {
+                            let mut c = core_copy.write().await;
+                            c.current_term += 1;
+                            let term = c.current_term;
+                            state_updater.send(RaftState::Canidate(term));
                         }
+
                         eprintln!("Lost Election");
                         drop(state_updater);
                         let r = (random::<u64>() % 200) + 300;
