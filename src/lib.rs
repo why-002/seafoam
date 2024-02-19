@@ -17,20 +17,20 @@ use raft::{Data, LogEntry, RaftState};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Req {
-    S {
+    Set {
         key: String,
         value: Data,
         msg_id: u32,
     },
-    G {
+    Get {
         key: String,
         msg_id: u32,
     },
-    GOk {
+    GetOk {
         value: Data,
         in_reply_to: u32,
     },
-    SOk {
+    SetOk {
         in_reply_to: u32,
     },
 }
@@ -50,11 +50,11 @@ pub async fn kv_store(
                 let frame = if let Ok(data) = frame.into_data() {
                     let obj: Req = serde_json::from_slice(&data).unwrap();
                     match obj {
-                        Req::G { key, msg_id } => {
+                        Req::Get { key, msg_id } => {
                             let guard = reader.guard();
                             let val = guard.get(&key);
                             if let Some(data) = val {
-                                let st = serde_json::to_string(&Req::GOk {
+                                let st = serde_json::to_string(&Req::GetOk {
                                     value: data.to_owned(),
                                     in_reply_to: msg_id,
                                 })
@@ -83,7 +83,7 @@ pub async fn kv_store(
             let frame;
             let obj: Req = serde_json::from_slice(&data).unwrap();
             match obj {
-                Req::S { key, value, msg_id } => {
+                Req::Set { key, value, msg_id } => {
                     let f = state.borrow().clone();
                     let v = v.clone();
                     if key == "foo" {
@@ -101,7 +101,7 @@ pub async fn kv_store(
                                     term: term,
                                 })
                             });
-                            let st = serde_json::to_string(&Req::SOk {
+                            let st = serde_json::to_string(&Req::SetOk {
                                 in_reply_to: msg_id,
                             })
                             .unwrap();
