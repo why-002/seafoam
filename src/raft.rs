@@ -261,11 +261,19 @@ async fn send_global_heartbeat(
         address: c.address,
     };
 
+    let mut pool = tokio::task::JoinSet::new();
     for address in addresses {
-        eprintln!("{:?}", address);
-        if let Ok(mut response) = send_heartbeat(address, request.clone()).await {
+        let request = request.clone();
+        pool.spawn(async move {
+            let x = send_heartbeat(address, request.clone()).await;
+            return (x, address);
+        });
+    }
+
+    while !pool.is_empty() {
+        if let Some(Ok(response)) = pool.join_next().await {
             match response {
-                RaftManagementResponse::HeartbeatAddOne { max_received } => {
+                (Ok(RaftManagementResponse::HeartbeatAddOne { max_received }), address) => {
                     let l = log.clone();
                     let request = RaftManagementRequest::Heartbeat {
                         latest_sent: None,
@@ -310,21 +318,22 @@ async fn send_global_heartbeat(
                     //     }
                     // }
                 }
-                RaftManagementResponse::HeartbeatOk {
-                    max_received,
-                    current_term,
-                } => {
+                (
+                    Ok(RaftManagementResponse::HeartbeatOk {
+                        max_received,
+                        current_term,
+                    }),
+                    _,
+                ) => {
                     eprintln!("heartbeat ok");
                     max_recieved_members.push(max_received);
                 }
-                RaftManagementResponse::HeartbeatRejected { current_term } => {
+                (Ok(RaftManagementResponse::HeartbeatRejected { current_term }), _) => {
                     eprintln!("heartbeat reject");
                     state.current_term = state.current_term.max(current_term);
                 }
-                _ => panic!("Received a voting response instead of a heartbeat response"),
+                _ => continue,
             }
-        } else {
-            eprintln!("Failed to get heartbeat");
         }
     }
 
@@ -337,8 +346,4 @@ async fn send_global_heartbeat(
     }
 
     return Ok(state.current_term.max(c.current_term));
-}
-
-fn foo() {
-    // tokio::task::JoinSet
 }
