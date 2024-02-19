@@ -185,22 +185,34 @@ async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
         max_received: c.max_received,
     };
 
-    eprintln!("{:?}", members);
+    let mut pool = tokio::task::JoinSet::new();
     for address in members {
-        // Make request and increment current_votes if it voted for you
-        match send_vote_request(address, request.clone()).await {
-            Ok(RaftManagementResponse::VoteOk {}) => current_votes += 1,
-            Ok(RaftManagementResponse::VoteRejected {
-                current_term,
-                max_received: _,
-            }) => {
-                eprintln!("Vote was rejected, updating term");
-                if c.current_term < current_term {
-                    c.current_term = current_term;
-                    return Ok(false);
+        pool.spawn(send_vote_request(address, request.clone()));
+    }
+
+    while !pool.is_empty() {
+        if let Some(Ok(response)) = pool.join_next().await {
+            match response {
+                Ok(RaftManagementResponse::VoteOk {}) => current_votes += 1,
+                Ok(RaftManagementResponse::VoteRejected {
+                    current_term,
+                    max_received: _,
+                }) => {
+                    eprintln!("Vote was rejected, updating term");
+                    if c.current_term < current_term {
+                        c.current_term = current_term;
+                        return Ok(false);
+                    }
                 }
+                _ => continue,
             }
-            _ => panic!("Received a heartbeat response instead of a vote response"),
+            if current_votes >= target_votes {
+                eprintln!("Votes {}:{}", current_votes, target_votes);
+                return Ok(true);
+            } else if current_votes + pool.len() < target_votes {
+                eprintln!("Votes {}:{}", current_votes, target_votes);
+                return Ok(false);
+            }
         }
     }
     eprintln!("Votes {}:{}", current_votes, target_votes);
@@ -325,4 +337,8 @@ async fn send_global_heartbeat(
     }
 
     return Ok(state.current_term.max(c.current_term));
+}
+
+fn foo() {
+    // tokio::task::JoinSet
 }
