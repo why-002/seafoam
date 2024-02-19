@@ -167,7 +167,7 @@ fn generate_heartbeat_response(
             if x != y {
                 // latest_sent did not equal the same spot in current log, need to add-one
                 response = RaftManagementResponse::HeartbeatAddOne {
-                    max_received: old_received.min(x.get_index()) - 1,
+                    max_received: old_received.min(x.get_index()),
                 };
                 eprintln!("Responding with {:?}", response);
             }
@@ -175,7 +175,7 @@ fn generate_heartbeat_response(
         (Some(x), None) => {
             // The entry did not have a corresponding match, need to call for a heartbeat add-one
             response = RaftManagementResponse::HeartbeatAddOne {
-                max_received: old_received.min(x.get_index()) - 1,
+                max_received: old_received.min(x.get_index()),
             };
         }
         (_, _) => {}

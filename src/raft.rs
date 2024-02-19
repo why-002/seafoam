@@ -119,10 +119,10 @@ pub async fn raft_state_manager(
                 }
                 RaftState::Leader(term) => {
                     let state_updater = state_copy.write().await;
-                    let h = tokio::task::spawn(send_global_heartbeat(
-                        core_copy.clone(),
-                        log_copy.clone(),
-                    ));
+                    let h = tokio::time::timeout(
+                        tokio::time::Duration::from_millis(100),
+                        send_global_heartbeat(core_copy.clone(), log_copy.clone()),
+                    );
                     let t = h.await;
                     if let Ok(Ok(t)) = t {
                         if t > term {
@@ -279,15 +279,38 @@ async fn send_global_heartbeat(
         if let Some(Ok(response)) = pool.join_next().await {
             match response {
                 (Ok(RaftManagementResponse::HeartbeatAddOne { max_received }), address) => {
-                    let l = log.clone();
-                    let request = RaftManagementRequest::Heartbeat {
-                        latest_sent: None,
-                        current_term: state.current_term,
-                        commit_to: state.max_committed,
-                        log_entries: l.read().await.clone(),
-                        address: c.address,
-                    };
-                    send_heartbeat(address, request.clone()).await;
+                    let request;
+                    let log = log.clone();
+                    let l = log.read().await;
+                    let latest_sent = l.get(max_received - 2).cloned();
+                    if let Some(latest) = latest_sent {
+                        let entries = l
+                            .clone()
+                            .into_iter()
+                            .filter(|x| x.get_index() >= latest.get_index())
+                            .collect();
+                        request = RaftManagementRequest::Heartbeat {
+                            latest_sent: Some(latest),
+                            current_term: state.current_term,
+                            commit_to: state.max_committed,
+                            log_entries: entries,
+                            address: c.address,
+                        };
+                    } else {
+                        let entries = l.clone();
+                        request = RaftManagementRequest::Heartbeat {
+                            latest_sent: None,
+                            current_term: state.current_term,
+                            commit_to: state.max_committed,
+                            log_entries: entries,
+                            address: c.address,
+                        };
+                    }
+                    eprintln!("Sent HeartbeatAddOne: {:?}", request);
+                    pool.spawn(async move {
+                        let x = send_heartbeat(address, request.clone()).await;
+                        return (x, address);
+                    });
                     // eprintln!("heartbeat add-one");
                     // let mut should_break = false;
                     // while let RaftManagementResponse::HeartbeatAddOne { max_received } = response {
