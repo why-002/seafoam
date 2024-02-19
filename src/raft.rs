@@ -264,6 +264,11 @@ async fn send_global_heartbeat(
     let mut pool = tokio::task::JoinSet::new();
     for address in addresses {
         let request = request.clone();
+
+        /*
+        returning the address with the response in order to have accesss in the while loop. Looking for a
+            more idiomatic way to solve it, but for now this can work.
+         */
         pool.spawn(async move {
             let x = send_heartbeat(address, request.clone()).await;
             return (x, address);
