@@ -96,10 +96,14 @@ pub async fn raft_state_manager(
             let state = state_ref_copy.borrow().clone();
             match state {
                 RaftState::Canidate(term) => {
-                    let won_election = run_election(core_copy.clone()).await;
+                    let won_election = tokio::time::timeout(
+                        tokio::time::Duration::from_millis(100),
+                        run_election(core_copy.clone()),
+                    )
+                    .await;
                     let current_state = state_ref_copy.borrow().clone();
                     eprintln!("Finished election");
-                    if let Ok(true) = won_election {
+                    if let Ok(Ok(true)) = won_election {
                         eprintln!("won");
                         let state_updater = state_copy.write().await;
                         state_updater.send(RaftState::Leader(term));
@@ -311,40 +315,6 @@ async fn send_global_heartbeat(
                         let x = send_heartbeat(address, request.clone()).await;
                         return (x, address);
                     });
-                    // eprintln!("heartbeat add-one");
-                    // let mut should_break = false;
-                    // while let RaftManagementResponse::HeartbeatAddOne { max_received } = response {
-                    //     if max_received == 0 {
-                    //         if should_break {
-                    //             break;
-                    //         }
-                    //         should_break = true;
-                    //         continue;
-                    //     }
-                    //     //todo!("not finished add-one");
-                    //     eprintln!("Add-one triggered");
-                    //     if let RaftManagementRequest::Heartbeat { latest_sent, current_term, commit_to, log_entries, address } = request.clone() {
-                    //         let l = log.read().await;
-                    //         let new_last = l.get(max_received - 2).cloned();
-                    //         let mut new_logs = Vec::new();
-
-                    //         if let Some(last) = new_last.clone() {
-                    //             new_logs = l.clone().into_iter().filter(|x| {
-                    //                 x.get_index() >= last.get_index()
-                    //             }).collect();
-                    //         }
-                    //         else {
-                    //             new_logs = l.clone();
-                    //         }
-
-                    //         let new_request = RaftManagementRequest::Heartbeat { latest_sent: new_last, current_term: current_term, commit_to: commit_to, log_entries: new_logs, address: address };
-                    //         let mut socket = TcpStream::connect(address).await.unwrap();
-                    //         new_request.send_over_tcp_and_shutdown(&mut socket).await.unwrap();
-                    //         let mut buff = Vec::new();
-                    //         socket.read_to_end(&mut buff).await;
-                    //         response = serde_json::from_slice(&buff).unwrap_or(RaftManagementResponse::HeartbeatAddOne { max_received: (max_received - 1).min(0) });
-                    //     }
-                    // }
                 }
                 (
                     Ok(RaftManagementResponse::HeartbeatOk {
