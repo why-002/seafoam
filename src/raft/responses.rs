@@ -167,7 +167,7 @@ fn generate_heartbeat_response(
             if x != y {
                 // latest_sent did not equal the same spot in current log, need to add-one
                 response = RaftManagementResponse::HeartbeatAddOne {
-                    max_received: x.get_index() - 1,
+                    max_received: old_received.min(x.get_index()) - 1,
                 };
                 eprintln!("Responding with {:?}", response);
             }
@@ -175,7 +175,7 @@ fn generate_heartbeat_response(
         (Some(x), None) => {
             // The entry did not have a corresponding match, need to call for a heartbeat add-one
             response = RaftManagementResponse::HeartbeatAddOne {
-                max_received: x.get_index() - 1,
+                max_received: old_received.min(x.get_index()) - 1,
             };
         }
         (_, _) => {}
@@ -348,6 +348,34 @@ mod test {
                 message_last_entry,
             ),
             RaftManagementResponse::HeartbeatAddOne { max_received: 1 }
+        );
+    }
+    #[test]
+    fn heartbeat_match_none_low_reveived() {
+        let latest_sent = Some(LogEntry::Insert {
+            key: "foo".to_string(),
+            data: Data::String("Bar".to_string()),
+            index: 2,
+            term: 1,
+        });
+        let latest_match = None;
+        let old_received = 0;
+        let current_term = 1;
+        let message_last_entry = Some(LogEntry::Insert {
+            key: "foo".to_string(),
+            data: Data::String("Bar".to_string()),
+            index: 3,
+            term: 1,
+        });
+        assert_eq!(
+            generate_heartbeat_response(
+                latest_sent,
+                latest_match,
+                old_received,
+                current_term,
+                message_last_entry,
+            ),
+            RaftManagementResponse::HeartbeatAddOne { max_received: 0 }
         );
     }
     #[test]
