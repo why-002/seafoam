@@ -51,7 +51,7 @@ pub async fn handle_management_request(
     let req = serde_json::from_slice(&buf).expect("Failed to deserialize raft management request");
 
     match req {
-        //Heartbeat needs to be reworked
+        // use address from socket in order to set address to send to instead of it being a part of the message
         RaftManagementRequest::Heartbeat {
             latest_sent,
             current_term: message_current_term,
