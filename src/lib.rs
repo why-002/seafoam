@@ -33,6 +33,7 @@ pub enum Req {
     SetOk {
         in_reply_to: u32,
     },
+    GetFailed,
 }
 
 pub async fn kv_store(
@@ -46,34 +47,34 @@ pub async fn kv_store(
         (&Method::GET, "/") => Ok(Response::new(full("Hello world"))),
 
         (&Method::POST, "/get") => {
-            let frame_stream = req.into_body().map_frame(move |frame| {
-                let frame = if let Ok(data) = frame.into_data() {
-                    let obj: Req = serde_json::from_slice(&data).unwrap();
-                    match obj {
-                        Req::Get { key, msg_id } => {
-                            let guard = reader.guard();
-                            let val = guard.get(&key);
-                            if let Some(data) = val {
-                                let st = serde_json::to_string(&Req::GetOk {
-                                    value: data.to_owned(),
-                                    in_reply_to: msg_id,
-                                })
-                                .unwrap();
-                                st.as_bytes().into_iter().map(|byte| *byte).collect()
-                            } else {
-                                Bytes::new()
-                            }
-                        }
-                        _ => panic!(),
+            let mut resp = Response::builder();
+            let mut body = req.into_body();
+            let frame_stream = body.frame();
+            let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
+            let frame;
+            let obj: Req = serde_json::from_slice(&data).unwrap();
+
+            match obj {
+                Req::Get { key, msg_id } => {
+                    let guard = reader.guard();
+                    let val = guard.get(&key);
+                    if let Some(data) = val {
+                        let st = serde_json::to_string(&Req::GetOk {
+                            value: data.to_owned(),
+                            in_reply_to: msg_id,
+                        })
+                        .unwrap();
+                        frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                    } else {
+                        frame = Bytes::new();
+                        resp = resp.status(404);
                     }
-                } else {
-                    Bytes::new()
-                };
-
-                Frame::data(frame)
-            });
-
-            Ok(Response::new(frame_stream.boxed()))
+                }
+                _ => panic!(),
+            }
+            Ok(resp
+                .body(Full::new(frame).map_err(|never| match never {}).boxed())
+                .unwrap())
         }
         (&Method::POST, "/set") => {
             let mut resp = Response::builder();
