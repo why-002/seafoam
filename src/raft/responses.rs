@@ -57,10 +57,11 @@ pub async fn handle_management_request(
             current_term: message_current_term,
             commit_to,
             mut log_entries,
-            address,
+            mut address,
         } => {
             let c = core.read().await;
-
+            let x = socket.peer_addr().unwrap();
+            address.set_ip(x.ip());
             if c.current_term > message_current_term {
                 eprintln!(
                     "Rejected heartbeat, Self: {} Other: {}",
