@@ -92,11 +92,25 @@ pub async fn kv_store(
             let obj: Req = serde_json::from_slice(&data).unwrap();
             let f = state.borrow().clone();
             let mut writer = v.write().await;
-            let (frame, log) = foo(obj, &f, "/set".to_string(), &mut resp, writer.len() + 1);
-            if let Some(log) = log {
-                eprintln!("Writing log");
-                writer.push(log);
+            let mut frame = Bytes::new();
+
+            if let Req::Set { key, value, msg_id } = obj.clone() {
+                let (f, log) = generate_write_response(
+                    obj,
+                    &f,
+                    "/set".to_string(),
+                    &mut resp,
+                    writer.len() + 1,
+                );
+                frame = f;
+                if let Some(log) = log {
+                    eprintln!("Writing log");
+                    writer.push(log);
+                }
+            } else {
+                resp = resp.status(400);
             }
+
             Ok(resp
                 .body(Full::new(frame).map_err(|never| match never {}).boxed())
                 .unwrap())
@@ -109,11 +123,27 @@ pub async fn kv_store(
             let obj: Req = serde_json::from_slice(&data).unwrap();
             let f = state.borrow().clone();
             let mut writer = v.write().await;
-            let (frame, log) = foo(obj, &f, "/delete".to_string(), &mut resp, writer.len() + 1);
-            if let Some(log) = log {
-                writer.push(log);
+            let mut frame = Bytes::new();
+            if let Req::Delete {
+                key,
+                msg_id,
+                error_if_not_key,
+            } = obj.clone()
+            {
+                let (f, log) = generate_write_response(
+                    obj,
+                    &f,
+                    "/delete".to_string(),
+                    &mut resp,
+                    writer.len() + 1,
+                );
+                frame = f;
+                if let Some(log) = log {
+                    writer.push(log);
+                }
+            } else {
+                resp = resp.status(400);
             }
-
             Ok(resp
                 .body(Full::new(frame).map_err(|never| match never {}).boxed())
                 .unwrap())
@@ -140,7 +170,7 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
         .boxed()
 }
 
-fn foo(
+fn generate_write_response(
     req: Req,
     state: &RaftState,
     uri: String,
