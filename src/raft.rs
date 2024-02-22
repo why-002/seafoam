@@ -91,6 +91,7 @@ pub async fn raft_state_manager(
     tokio::task::spawn(async move {
         let state_ref_copy = state_ref_copy;
         let state_copy = state_copy;
+
         loop {
             let state_ref_copy = state_ref_copy.clone();
             let state = state_ref_copy.borrow().clone();
@@ -107,6 +108,56 @@ pub async fn raft_state_manager(
                         eprintln!("won");
                         let state_updater = state_copy.write().await;
                         state_updater.send(RaftState::Leader(term));
+                        drop(state_updater);
+                        let c = core_copy.read().await;
+                        let mut l = log_copy.write().await;
+                        let mut updated = l
+                            .iter_mut()
+                            .map(|x| match x.clone() {
+                                LogEntry::Insert {
+                                    key,
+                                    data,
+                                    index,
+                                    term: t,
+                                } => {
+                                    if term > t && c.max_committed < index {
+                                        LogEntry::Insert {
+                                            key,
+                                            data,
+                                            index,
+                                            term,
+                                        }
+                                    } else {
+                                        LogEntry::Insert {
+                                            key,
+                                            data,
+                                            index,
+                                            term: t,
+                                        }
+                                    }
+                                }
+                                LogEntry::Delete {
+                                    key,
+                                    index,
+                                    term: t,
+                                } => {
+                                    if term > t && c.max_committed < index {
+                                        LogEntry::Delete {
+                                            key,
+                                            index,
+                                            term: term,
+                                        }
+                                    } else {
+                                        LogEntry::Delete {
+                                            key,
+                                            index,
+                                            term: t,
+                                        }
+                                    }
+                                }
+                            })
+                            .collect::<Vec<LogEntry>>();
+                        l.append(&mut updated);
                         eprintln!("State is {:?}. Changing to Leader", state);
                         continue;
                     } else if let RaftState::Canidate(_) = current_state {
