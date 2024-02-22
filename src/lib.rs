@@ -139,12 +139,16 @@ pub async fn kv_store(
                 );
                 frame = f;
                 if let Some(log) = log {
+<<<<<<< HEAD
                     if reader.guard().contains_key(&key) {
                         writer.push(log);
                     } else {
                         resp = resp.status(400);
                         frame = Bytes::new();
                     }
+=======
+                    writer.push(log);
+>>>>>>> 66b3ac5ab594901bc2ccb010b5d7da1be1cbe334
                 }
             } else {
                 resp = resp.status(400);
