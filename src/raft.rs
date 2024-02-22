@@ -111,9 +111,8 @@ pub async fn raft_state_manager(
                         drop(state_updater);
                         let c = core_copy.read().await;
                         let mut l = log_copy.write().await;
-                        let mut updated = l
-                            .iter_mut()
-                            .map(|x| match x.clone() {
+                        for log_entry in l.iter_mut() {
+                            *log_entry = match log_entry.clone() {
                                 LogEntry::Insert {
                                     key,
                                     data,
@@ -155,9 +154,8 @@ pub async fn raft_state_manager(
                                         }
                                     }
                                 }
-                            })
-                            .collect::<Vec<LogEntry>>();
-                        l.append(&mut updated);
+                            }
+                        }
                         eprintln!("State is {:?}. Changing to Leader", state);
                         continue;
                     } else if let RaftState::Canidate(_) = current_state {
