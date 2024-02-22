@@ -1,13 +1,12 @@
 use bytes::Bytes;
-use flashmap::{self, new};
+use flashmap::{self};
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
-use hyper::body::Frame;
 use hyper::{Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{
-    watch::{self, *},
+    watch::{self},
     RwLock,
 };
 
