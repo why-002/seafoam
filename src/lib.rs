@@ -3,8 +3,8 @@ use flashmap::{self};
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::SystemTime;
+use std::{ops::DerefMut, sync::Arc};
 use tokio::sync::{
     watch::{self},
     RwLock,
@@ -89,55 +89,28 @@ pub async fn kv_store(
             let mut body = req.into_body();
             let frame_stream = body.frame();
             let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
-            let frame;
             let obj: Req = serde_json::from_slice(&data).unwrap();
-            match obj {
-                Req::Set { key, value, msg_id } => {
-                    let f = state.borrow().clone();
-                    let v = v.clone();
-                    if key == "foo" {
-                        eprintln!("Received foo at: {:?}", SystemTime::now());
-                    }
-                    match f {
-                        RaftState::Leader(term) => {
-                            tokio::task::spawn(async move {
-                                let mut writer = v.write().await;
-                                let size = writer.len() + 1;
-                                writer.push(LogEntry::Insert {
-                                    key: key,
-                                    data: value,
-                                    index: size,
-                                    term: term,
-                                })
-                            });
-                            let st = serde_json::to_string(&Req::SetOk {
-                                in_reply_to: msg_id,
-                            })
-                            .unwrap();
-                            frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
-                        }
-                        RaftState::Follower(_, addr, _) => {
-                            if let Some(addr) = addr {
-                                resp = resp
-                                    .header(
-                                        "Location",
-                                        "http://".to_owned() + &addr.to_string() + "/set",
-                                    )
-                                    .status(307);
-                                frame = Bytes::new();
-                            } else {
-                                resp = resp.status(500);
-                                frame = Bytes::new();
-                            }
-                        }
-                        RaftState::Canidate(_) => {
-                            resp = resp.status(500);
-                            frame = Bytes::new();
-                        }
-                    }
+            let f = state.borrow().clone();
+            let mut writer = v.write().await;
+            let mut frame = Bytes::new();
+
+            if let Req::Set { key, value, msg_id } = obj.clone() {
+                let (f, log) = generate_write_response(
+                    obj,
+                    &f,
+                    "/set".to_string(),
+                    &mut resp,
+                    writer.len() + 1,
+                );
+                frame = f;
+                if let Some(log) = log {
+                    eprintln!("Writing log");
+                    writer.push(log);
                 }
-                _ => panic!("{:?}", obj),
+            } else {
+                resp = resp.status(400);
             }
+
             Ok(resp
                 .body(Full::new(frame).map_err(|never| match never {}).boxed())
                 .unwrap())
@@ -147,59 +120,34 @@ pub async fn kv_store(
             let mut body = req.into_body();
             let frame_stream = body.frame();
             let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
-            let frame;
             let obj: Req = serde_json::from_slice(&data).unwrap();
-            match obj {
-                Req::Delete {
-                    key,
-                    msg_id,
-                    error_if_not_key,
-                } => {
-                    let f = state.borrow().clone();
-                    let v = v.clone();
-                    if key == "foo" {
-                        eprintln!("Received foo at: {:?}", SystemTime::now());
-                    }
-                    match f {
-                        RaftState::Leader(term) => {
-                            let k = key.clone();
-                            tokio::task::spawn(async move {
-                                let mut writer = v.write().await;
-                                let size = writer.len() + 1;
-                                writer.push(LogEntry::Delete {
-                                    key: k,
-                                    index: size,
-                                    term: term,
-                                })
-                            });
-                            let st = serde_json::to_string(&Req::DeleteOk {
-                                in_reply_to: msg_id,
-                                key: key,
-                            })
-                            .unwrap();
-                            frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
-                        }
-                        RaftState::Follower(_, addr, _) => {
-                            if let Some(addr) = addr {
-                                resp = resp
-                                    .header(
-                                        "Location",
-                                        "http://".to_owned() + &addr.to_string() + "/delete",
-                                    )
-                                    .status(307);
-                                frame = Bytes::new();
-                            } else {
-                                resp = resp.status(500);
-                                frame = Bytes::new();
-                            }
-                        }
-                        RaftState::Canidate(_) => {
-                            resp = resp.status(500);
-                            frame = Bytes::new();
-                        }
+            let f = state.borrow().clone();
+            let mut writer = v.write().await;
+            let mut frame = Bytes::new();
+            if let Req::Delete {
+                key,
+                msg_id,
+                error_if_not_key,
+            } = obj.clone()
+            {
+                let (f, log) = generate_write_response(
+                    obj,
+                    &f,
+                    "/delete".to_string(),
+                    &mut resp,
+                    writer.len() + 1,
+                );
+                frame = f;
+                if let Some(log) = log {
+                    if reader.guard().contains_key(&key) || error_if_not_key == false {
+                        writer.push(log);
+                    } else {
+                        resp = resp.status(400);
+                        frame = Bytes::new();
                     }
                 }
-                _ => panic!("{:?}", obj),
+            } else {
+                resp = resp.status(400);
             }
             Ok(resp
                 .body(Full::new(frame).map_err(|never| match never {}).boxed())
@@ -225,4 +173,68 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
     Full::new(chunk.into())
         .map_err(|never| match never {})
         .boxed()
+}
+
+fn generate_write_response(
+    req: Req,
+    state: &RaftState,
+    uri: String,
+    mut resp: &mut http::response::Builder,
+    size: usize,
+) -> (Bytes, Option<LogEntry>) {
+    match state {
+        &RaftState::Canidate(_) => {
+            *resp = Response::builder().status(500);
+        }
+        &RaftState::Follower(_, addr, _) => {
+            if let Some(addr) = addr {
+                *resp = Response::builder()
+                    .header("Location", "http://".to_owned() + &addr.to_string() + &uri)
+                    .status(307);
+            } else {
+                *resp = Response::builder().status(500);
+            }
+        }
+        &RaftState::Leader(term) => match req {
+            Req::Set { key, value, msg_id } => {
+                let st = serde_json::to_string(&Req::SetOk {
+                    in_reply_to: msg_id,
+                })
+                .unwrap();
+                let bytes = st.as_bytes().into_iter().map(|byte| *byte).collect();
+
+                return (
+                    bytes,
+                    Some(LogEntry::Insert {
+                        key: key,
+                        data: value,
+                        index: size,
+                        term: term,
+                    }),
+                );
+            }
+            Req::Delete {
+                key,
+                msg_id,
+                error_if_not_key,
+            } => {
+                let st = serde_json::to_string(&Req::DeleteOk {
+                    in_reply_to: msg_id,
+                    key: key.to_owned(),
+                })
+                .unwrap();
+                let bytes = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                return (
+                    bytes,
+                    Some(LogEntry::Delete {
+                        key: key,
+                        index: size,
+                        term: term,
+                    }),
+                );
+            }
+            _ => {}
+        },
+    }
+    return (Bytes::new(), None);
 }
