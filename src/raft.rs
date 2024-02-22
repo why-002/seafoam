@@ -30,7 +30,7 @@ pub async fn log_manager(
         let c = core.read().await;
         let new_index = c.max_committed;
         drop(c);
-        if new_index > current_index {
+        if new_index != current_index {
             let log_handle = log.read().await;
             let new_entries = log_handle.clone().into_iter().filter(|x| match x {
                 LogEntry::Insert {
