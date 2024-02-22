@@ -119,11 +119,13 @@ pub async fn raft_state_manager(
                                     index,
                                     term: t,
                                 } => {
-                                    *log_entry = LogEntry::Insert {
-                                        key: key.clone(),
-                                        data: data.clone(),
-                                        index: *index,
-                                        term,
+                                    if term > *t && c.max_committed < *index {
+                                        *log_entry = LogEntry::Insert {
+                                            key: key.clone(),
+                                            data: data.clone(),
+                                            index: *index,
+                                            term,
+                                        }
                                     }
                                 }
                                 LogEntry::Delete {
@@ -131,10 +133,12 @@ pub async fn raft_state_manager(
                                     index,
                                     term: t,
                                 } => {
-                                    *log_entry = LogEntry::Delete {
-                                        key: key.clone(),
-                                        index: *index,
-                                        term,
+                                    if term > *t && c.max_committed < *index {
+                                        *log_entry = LogEntry::Delete {
+                                            key: key.clone(),
+                                            index: *index,
+                                            term,
+                                        }
                                     }
                                 }
                             }
