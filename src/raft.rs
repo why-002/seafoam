@@ -112,27 +112,18 @@ pub async fn raft_state_manager(
                         let c = core_copy.read().await;
                         let mut l = log_copy.write().await;
                         for log_entry in l.iter_mut() {
-                            *log_entry = match log_entry.clone() {
+                            match log_entry {
                                 LogEntry::Insert {
                                     key,
                                     data,
                                     index,
                                     term: t,
                                 } => {
-                                    if term > t && c.max_committed < index {
-                                        LogEntry::Insert {
-                                            key,
-                                            data,
-                                            index,
-                                            term,
-                                        }
-                                    } else {
-                                        LogEntry::Insert {
-                                            key,
-                                            data,
-                                            index,
-                                            term: t,
-                                        }
+                                    *log_entry = LogEntry::Insert {
+                                        key: key.clone(),
+                                        data: data.clone(),
+                                        index: *index,
+                                        term,
                                     }
                                 }
                                 LogEntry::Delete {
@@ -140,17 +131,11 @@ pub async fn raft_state_manager(
                                     index,
                                     term: t,
                                 } => {
-                                    if term > t && c.max_committed < index {
-                                        LogEntry::Delete {
-                                            key,
-                                            index,
-                                            term: term,
-                                        }
-                                    } else {
-                                        LogEntry::Delete {
-                                            key,
-                                            index,
-                                            term: t,
+                                    if term > *t && c.max_committed < *index {
+                                        *log_entry = LogEntry::Delete {
+                                            key: key.clone(),
+                                            index: *index,
+                                            term,
                                         }
                                     }
                                 }
