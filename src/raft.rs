@@ -44,6 +44,13 @@ pub async fn log_manager(
                     index,
                     term: _,
                 } => *index > current_index && *index <= new_index,
+                LogEntry::Cas {
+                    key,
+                    old_value,
+                    new_value,
+                    index,
+                    term,
+                } => todo!("Implement Cas"),
             });
             let mut write_guard = writer.guard();
             for e in new_entries {
@@ -64,6 +71,13 @@ pub async fn log_manager(
                         index: _,
                         term: _,
                     } => write_guard.remove(key),
+                    LogEntry::Cas {
+                        key,
+                        old_value,
+                        new_value,
+                        index,
+                        term,
+                    } => todo!("Implement Cas"),
                 };
             }
             write_guard.publish();
@@ -141,6 +155,13 @@ pub async fn raft_state_manager(
                                         }
                                     }
                                 }
+                                LogEntry::Cas {
+                                    key,
+                                    old_value,
+                                    new_value,
+                                    index,
+                                    term,
+                                } => todo!("Implement Cas"),
                             }
                         }
                         eprintln!("State is {:?}. Changing to Leader", state);

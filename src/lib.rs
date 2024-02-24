@@ -16,6 +16,12 @@ use raft::{Data, LogEntry, RaftState};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Req {
+    CaS {
+        key: String,
+        old_value: Data,
+        new_value: Data,
+        msg_id: u32,
+    },
     Delete {
         key: String,
         msg_id: u32,
@@ -37,6 +43,10 @@ pub enum Req {
     DeleteOk {
         in_reply_to: u32,
         key: String,
+    },
+    CasOk {
+        in_reply_to: u32,
+        new_value: Data,
     },
     SetOk {
         in_reply_to: u32,

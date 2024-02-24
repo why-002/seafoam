@@ -24,6 +24,13 @@ pub enum LogEntry {
         index: usize,
         term: usize,
     },
+    Cas {
+        key: String,
+        old_value: Data,
+        new_value: Data,
+        index: usize,
+        term: usize,
+    },
 }
 
 impl LogEntry {
@@ -40,6 +47,7 @@ impl LogEntry {
                 index,
                 term: _,
             } => *index,
+            _ => todo!("Implement Cas"),
         }
     }
 }
