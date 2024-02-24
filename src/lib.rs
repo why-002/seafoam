@@ -126,7 +126,7 @@ pub async fn kv_store(
             let mut frame = Bytes::new();
             if let Req::Delete {
                 key,
-                msg_id,
+                msg_id: _,
                 error_if_not_key,
             } = obj.clone()
             {

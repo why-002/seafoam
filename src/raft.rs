@@ -30,7 +30,7 @@ pub async fn log_manager(
         let c = core.read().await;
         let new_index = c.max_committed;
         drop(c);
-        if new_index > current_index {
+        if new_index != current_index {
             let log_handle = log.read().await;
             let new_entries = log_handle.clone().into_iter().filter(|x| match x {
                 LogEntry::Insert {
@@ -91,6 +91,7 @@ pub async fn raft_state_manager(
     tokio::task::spawn(async move {
         let state_ref_copy = state_ref_copy;
         let state_copy = state_copy;
+
         loop {
             let state_ref_copy = state_ref_copy.clone();
             let state = state_ref_copy.borrow().clone();
@@ -107,6 +108,41 @@ pub async fn raft_state_manager(
                         eprintln!("won");
                         let state_updater = state_copy.write().await;
                         state_updater.send(RaftState::Leader(term));
+                        drop(state_updater);
+                        let c = core_copy.read().await;
+                        let mut l = log_copy.write().await;
+                        for log_entry in l.iter_mut() {
+                            match log_entry {
+                                LogEntry::Insert {
+                                    key,
+                                    data,
+                                    index,
+                                    term: t,
+                                } => {
+                                    if term > *t && c.max_committed < *index {
+                                        *log_entry = LogEntry::Insert {
+                                            key: key.clone(),
+                                            data: data.clone(),
+                                            index: *index,
+                                            term,
+                                        }
+                                    }
+                                }
+                                LogEntry::Delete {
+                                    key,
+                                    index,
+                                    term: t,
+                                } => {
+                                    if term > *t && c.max_committed < *index {
+                                        *log_entry = LogEntry::Delete {
+                                            key: key.clone(),
+                                            index: *index,
+                                            term,
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         eprintln!("State is {:?}. Changing to Leader", state);
                         continue;
                     } else if let RaftState::Canidate(_) = current_state {
