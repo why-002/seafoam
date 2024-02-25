@@ -50,7 +50,7 @@ pub async fn log_manager(
                     new_value,
                     index,
                     term,
-                } => todo!("Implement Cas"),
+                } => *index > current_index && *index <= new_index,
             });
             let mut write_guard = writer.guard();
             for e in new_entries {
@@ -64,20 +64,28 @@ pub async fn log_manager(
                         if key == "foo" {
                             eprintln!("logged foo at: {:?}", SystemTime::now());
                         }
-                        write_guard.insert(key, data)
+                        write_guard.insert(key, data);
                     }
                     LogEntry::Delete {
                         key,
                         index: _,
                         term: _,
-                    } => write_guard.remove(key),
+                    } => {
+                        write_guard.remove(key);
+                    }
                     LogEntry::Cas {
                         key,
                         old_value,
                         new_value,
                         index,
                         term,
-                    } => todo!("Implement Cas"),
+                    } => {
+                        if let Some(current) = write_guard.get(&key) {
+                            if *current == old_value {
+                                write_guard.insert(key, new_value);
+                            }
+                        }
+                    }
                 };
             }
             write_guard.publish();

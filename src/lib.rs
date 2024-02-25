@@ -163,7 +163,45 @@ pub async fn kv_store(
                 .body(Full::new(frame).map_err(|never| match never {}).boxed())
                 .unwrap())
         }
-
+        (&Method::POST, "/cas") => {
+            let mut resp = Response::builder();
+            let mut body = req.into_body();
+            let frame_stream = body.frame();
+            let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
+            let obj: Req = serde_json::from_slice(&data).unwrap();
+            let f = state.borrow().clone();
+            let mut writer = v.write().await;
+            let mut frame = Bytes::new();
+            if let Req::CaS {
+                key,
+                old_value,
+                new_value,
+                msg_id,
+            } = obj.clone()
+            {
+                let (f, log) = generate_write_response(
+                    obj,
+                    &f,
+                    "/cas".to_string(),
+                    &mut resp,
+                    writer.len() + 1,
+                );
+                frame = f;
+                if let Some(log) = log {
+                    if reader.guard().contains_key(&key) {
+                        writer.push(log);
+                    } else {
+                        resp = resp.status(400);
+                        frame = Bytes::new();
+                    }
+                }
+            } else {
+                resp = resp.status(400);
+            }
+            Ok(resp
+                .body(Full::new(frame).map_err(|never| match never {}).boxed())
+                .unwrap())
+        }
         // Return the 404 Not Found for other routes.
         _ => {
             let mut not_found = Response::new(empty());
@@ -238,6 +276,29 @@ fn generate_write_response(
                     bytes,
                     Some(LogEntry::Delete {
                         key: key,
+                        index: size,
+                        term: term,
+                    }),
+                );
+            }
+            Req::CaS {
+                key,
+                old_value,
+                new_value,
+                msg_id,
+            } => {
+                let st = serde_json::to_string(&Req::CasOk {
+                    in_reply_to: msg_id,
+                    new_value: new_value.clone(),
+                })
+                .unwrap();
+                let bytes = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                return (
+                    bytes,
+                    Some(LogEntry::Cas {
+                        key: key,
+                        old_value: old_value,
+                        new_value: new_value,
                         index: size,
                         term: term,
                     }),
