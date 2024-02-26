@@ -28,14 +28,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
 
-    let log = Arc::new(RwLock::new(Vec::new()));
-    let (state_sender, state_receiver) = watch::channel(RaftState::Follower(0, None, true));
-
     let client_port = args[1].parse::<u16>().expect("Invalid client port");
-    let management_port = args[2].parse::<u16>().expect("Invalid management port");
+    let _ = args[2].parse::<u16>().expect("Invalid management port");
     for i in 3..args.len() {
         let _ = SocketAddr::from_str(&args[i]).expect("Invalid member address");
     }
+
+    let log = Arc::new(RwLock::new(Vec::new()));
+    let (state_sender, state_receiver) = watch::channel(RaftState::Follower(0, None, true));
 
     let internal_state = Arc::new(RwLock::new(RaftCore {
         max_committed: 0,
