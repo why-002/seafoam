@@ -149,7 +149,7 @@ pub async fn kv_store(
                 );
                 frame = f;
                 if let Some(log) = log {
-                    if reader.guard().contains_key(&key) || error_if_not_key == false {
+                    if reader.guard().contains_key(&key) || !error_if_not_key {
                         writer.push(log);
                     } else {
                         resp = resp.status(400);
