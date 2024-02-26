@@ -19,18 +19,34 @@ use seafoam::{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = env::args().collect();
+
+    if args.len() < 3 || args[1] == "--help" || args[1] == "-h" {
+        println!(
+            "Usage: {} <client port> <management port> <member1> <member2> ...",
+            args[0]
+        );
+        return Ok(());
+    }
+
     let log = Arc::new(RwLock::new(Vec::new()));
     let (state_sender, state_receiver) = watch::channel(RaftState::Follower(0, None, true));
+
+    let client_port = args[1].parse::<u16>().expect("Invalid client port");
+    let management_port = args[2].parse::<u16>().expect("Invalid management port");
+    for i in 3..args.len() {
+        let _ = SocketAddr::from_str(&args[i]).expect("Invalid member address");
+    }
+
     let internal_state = Arc::new(RwLock::new(RaftCore {
         max_committed: 0,
         max_received: 0,
         current_term: 1,
         members: Vec::new(),
-        address: SocketAddr::from(([0, 0, 0, 0], args[1].parse::<u16>().unwrap())),
+        address: SocketAddr::from(([0, 0, 0, 0], client_port)),
         last_voted: 0,
     }));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], args[1].parse::<u16>().unwrap()));
+    let addr = SocketAddr::from(([0, 0, 0, 0], client_port));
 
     let mut writer = internal_state.write().await;
     let max = args.len();
