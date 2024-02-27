@@ -133,7 +133,7 @@ pub async fn raft_state_manager(
                         drop(state_updater);
                         let c = core_copy.read().await;
                         let mut l = log_copy.write().await;
-                        for log_entry in l.iter_mut() {
+                        for log_entry in l.iter_mut().skip(c.max_committed - 1) {
                             match log_entry {
                                 LogEntry::Insert {
                                     key,
@@ -168,9 +168,18 @@ pub async fn raft_state_manager(
                                     old_value,
                                     new_value,
                                     index,
-                                    term,
-                                } => todo!("Implement Cas"),
+                                    term: t,
+                                } => {
+                                    if term > *t && c.max_committed < *index {
+                                        *log_entry = LogEntry::Delete {
+                                            key: key.clone(),
+                                            index: *index,
+                                            term,
+                                        }
+                                    }
+                                }
                             }
+                            eprintln!("{:?}", log_entry);
                         }
                         eprintln!("State is {:?}. Changing to Leader", state);
                         continue;
