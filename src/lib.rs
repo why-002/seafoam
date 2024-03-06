@@ -114,7 +114,6 @@ pub async fn kv_store(
                 );
                 frame = f;
                 if let Some(log) = log {
-                    eprintln!("Writing log");
                     writer.push(log);
                 }
             } else {

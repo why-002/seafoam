@@ -133,6 +133,7 @@ pub async fn raft_state_manager(
                         drop(state_updater);
                         let c = core_copy.read().await;
                         let mut l = log_copy.write().await;
+                        // Will need to update this once log compaction is implemented as this will no longer work appropriately
                         for log_entry in l.iter_mut().skip(c.max_committed - 1) {
                             match log_entry {
                                 LogEntry::Insert {
