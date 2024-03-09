@@ -32,6 +32,7 @@ pub async fn log_manager(
         drop(c);
         if new_index > current_index {
             let log_handle = log.read().await;
+            // This is probably a perf nightmare
             let new_entries = log_handle.clone().into_iter().filter(|x| match x {
                 LogEntry::Insert {
                     key: _,
@@ -315,7 +316,7 @@ async fn send_global_heartbeat(
         c.max_committed = c.max_received;
         return Ok(c.current_term);
     }
-
+    // Also a perf nightmare
     let new_logs = l
         .clone()
         .into_iter()
@@ -343,11 +344,6 @@ async fn send_global_heartbeat(
     let mut pool = tokio::task::JoinSet::new();
     for address in addresses {
         let request = request.clone();
-
-        /*
-        returning the address with the response in order to have accesss in the while loop. Looking for a
-            more idiomatic way to solve it, but for now this can work.
-         */
         pool.spawn(async move {
             let x = send_heartbeat(address, request.clone()).await;
             return (x, address);
