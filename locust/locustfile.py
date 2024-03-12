@@ -16,7 +16,7 @@ class QuickstartUser(FastHttpUser):
 
     @task
     def set(self):
-        if random.randint(0,10) % 10 == 0 or len(self.current_keys) == 0:
+        if random.randint(0,10) % 10 == 0 or len(self.current_keys) == 0 or len(self.current_keys) > 10000:
             new = random.choice(string.ascii_lowercase) + random.choice(string.ascii_lowercase) + random.choice(string.ascii_lowercase) + random.choice(string.ascii_lowercase)
             self.client.post("/set", json={"key": new, "value": "baz", "msg_id" : 0})
             self.current_keys.append(new)

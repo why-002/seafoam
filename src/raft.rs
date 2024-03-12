@@ -3,6 +3,7 @@ use flashmap::{self};
 use rand::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::thread::current;
 use std::time::SystemTime;
 use tokio::net::TcpListener;
 use tokio::sync::{
@@ -32,28 +33,12 @@ pub async fn log_manager(
         drop(c);
         if new_index > current_index {
             let log_handle = log.read().await;
-            // This is probably a perf nightmare
-            let new_entries = log_handle.clone().into_iter().filter(|x| match x {
-                LogEntry::Insert {
-                    key: _,
-                    data: _,
-                    index,
-                    term: _,
-                } => *index > current_index && *index <= new_index,
-                LogEntry::Delete {
-                    key: _,
-                    index,
-                    term: _,
-                } => *index > current_index && *index <= new_index,
-                LogEntry::Cas {
-                    key,
-                    old_value,
-                    new_value,
-                    index,
-                    term,
-                } => *index > current_index && *index <= new_index,
-            });
+            let new_entries = log_handle[current_index..new_index].to_vec();
+            let log_len = log_handle.len();
+            drop(log_handle);
+
             let mut write_guard = writer.guard();
+
             for e in new_entries {
                 match e {
                     LogEntry::Insert {
@@ -83,14 +68,14 @@ pub async fn log_manager(
                     } => {
                         if let Some(current) = write_guard.get(&key) {
                             if *current == old_value {
-                                write_guard.insert(key, new_value);
+                                write_guard.insert(key.to_owned(), new_value.to_owned());
                             }
                         }
                     }
                 };
             }
             write_guard.publish();
-            current_index = new_index.min(log_handle.len());
+            current_index = new_index.min(log_len);
         }
     }
 }
@@ -135,7 +120,7 @@ pub async fn raft_state_manager(
                         let c = core_copy.read().await;
                         let mut l = log_copy.write().await;
                         // Will need to update this once log compaction is implemented as this will no longer work appropriately
-                        for log_entry in l.iter_mut().skip(c.max_committed - 1) {
+                        for log_entry in l[0.min(c.max_committed - 1)..].iter_mut() {
                             match log_entry {
                                 LogEntry::Insert {
                                     key,
@@ -249,7 +234,6 @@ pub async fn raft_state_manager(
     }
 }
 
-// TODO: use is_finished() on spawned threads in order to do async, probably write a threadpool struct
 async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
     let mut c = core.write().await;
     if c.last_voted >= c.current_term {
@@ -299,8 +283,6 @@ async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
     return Ok(current_votes >= target_votes);
 }
 
-//TODO: rewrite so the heartbeats are not sync with each other
-// Rewrite so it loops sending lower lasts until it succeded (requires them to be async from each other)
 async fn send_global_heartbeat(
     core: Arc<RwLock<RaftCore>>,
     log: Arc<RwLock<Vec<LogEntry>>>,
@@ -316,13 +298,8 @@ async fn send_global_heartbeat(
         c.max_committed = c.max_received;
         return Ok(c.current_term);
     }
-    // Also a perf nightmare
-    let new_logs = l
-        .clone()
-        .into_iter()
-        .filter(|x| x.get_index() > c.max_received)
-        .collect::<Vec<LogEntry>>();
 
+    let new_logs = l[c.max_received..].to_vec();
     let last = l.get(c.max_received - 1).cloned();
 
     if let Some(last_entry) = l.last() {

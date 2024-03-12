@@ -3,7 +3,6 @@ use flashmap::{self};
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
-use std::time::SystemTime;
 use std::{ops::DerefMut, sync::Arc};
 use tokio::sync::{
     watch::{self},

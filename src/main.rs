@@ -16,6 +16,7 @@ use seafoam::{
     raft::{log_manager, raft_state_manager, RaftCore, RaftState},
 };
 
+//#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = env::args().collect();
