@@ -3,7 +3,6 @@ use flashmap::{self};
 use rand::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::thread::current;
 use std::time::SystemTime;
 use tokio::net::TcpListener;
 use tokio::sync::{
@@ -31,6 +30,8 @@ pub async fn log_manager(
         let c = core.read().await;
         let new_index = c.max_committed;
         drop(c);
+
+        // Check if there are new log entries that need to be committed to the data store and apply them
         if new_index > current_index {
             let log_handle = log.read().await;
             let new_entries = log_handle[current_index..new_index].to_vec();
@@ -110,25 +111,30 @@ pub async fn raft_state_manager(
                         run_election(core_copy.clone()),
                     )
                     .await;
+
                     let current_state = state_ref_copy.borrow().clone();
-                    eprintln!("Finished election");
+                    eprintln!("Finished Election");
+
                     if let Ok(Ok(true)) = won_election {
-                        eprintln!("won");
+                        eprintln!("Won Election");
                         let state_updater = state_copy.write().await;
                         state_updater.send(RaftState::Leader(term));
                         drop(state_updater);
                         let c = core_copy.read().await;
                         let mut l = log_copy.write().await;
+
                         // Will need to update this once log compaction is implemented as this will no longer work appropriately
                         for log_entry in l[0.min(c.max_committed - 1)..].iter_mut() {
-                            match log_entry {
-                                LogEntry::Insert {
-                                    key,
-                                    data,
-                                    index,
-                                    term: t,
-                                } => {
-                                    if term > *t && c.max_committed < *index {
+                            if term > log_entry.get_term()
+                                && c.max_committed < log_entry.get_index()
+                            {
+                                match log_entry {
+                                    LogEntry::Insert {
+                                        key,
+                                        data,
+                                        index,
+                                        term: t,
+                                    } => {
                                         *log_entry = LogEntry::Insert {
                                             key: key.clone(),
                                             data: data.clone(),
@@ -136,28 +142,24 @@ pub async fn raft_state_manager(
                                             term,
                                         }
                                     }
-                                }
-                                LogEntry::Delete {
-                                    key,
-                                    index,
-                                    term: t,
-                                } => {
-                                    if term > *t && c.max_committed < *index {
+                                    LogEntry::Delete {
+                                        key,
+                                        index,
+                                        term: t,
+                                    } => {
                                         *log_entry = LogEntry::Delete {
                                             key: key.clone(),
                                             index: *index,
                                             term,
                                         }
                                     }
-                                }
-                                LogEntry::Cas {
-                                    key,
-                                    old_value,
-                                    new_value,
-                                    index,
-                                    term: t,
-                                } => {
-                                    if term > *t && c.max_committed < *index {
+                                    LogEntry::Cas {
+                                        key,
+                                        old_value,
+                                        new_value,
+                                        index,
+                                        term: t,
+                                    } => {
                                         *log_entry = LogEntry::Delete {
                                             key: key.clone(),
                                             index: *index,
@@ -166,6 +168,7 @@ pub async fn raft_state_manager(
                                     }
                                 }
                             }
+
                             eprintln!("{:?}", log_entry);
                         }
                         eprintln!("State is {:?}. Changing to Leader", state);
@@ -236,6 +239,8 @@ pub async fn raft_state_manager(
 
 async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
     let mut c = core.write().await;
+
+    // Return early if the node has already voted in the current term
     if c.last_voted >= c.current_term {
         c.current_term = c.last_voted;
         return Ok(false);
@@ -249,11 +254,13 @@ async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
         max_received: c.max_received,
     };
 
+    // Spawn vote requests as individual tasks
     let mut pool = tokio::task::JoinSet::new();
     for address in members {
         pool.spawn(send_vote_request(address, request.clone()));
     }
 
+    // Wait for the vote requests to complete in any order, returning early if the result of the election can be determined
     while !pool.is_empty() {
         if let Some(Ok(response)) = pool.join_next().await {
             match response {
@@ -293,6 +300,7 @@ async fn send_global_heartbeat(
 
     let addresses = c.members.clone();
 
+    // Node is running in a cluster of 1, so does not need to coordinate with any other nodes
     if addresses.len() == 0 {
         c.max_received = l.len();
         c.max_committed = c.max_received;
@@ -318,6 +326,7 @@ async fn send_global_heartbeat(
         address: c.address,
     };
 
+    // Spawn heartbeats as individual tasks
     let mut pool = tokio::task::JoinSet::new();
     for address in addresses {
         let request = request.clone();
@@ -327,6 +336,7 @@ async fn send_global_heartbeat(
         });
     }
 
+    // Wait for the heartbeats to complete in any order, adding a new request to the pool in the instance of a heartbeat add-one response
     while !pool.is_empty() {
         if let Some(Ok(response)) = pool.join_next().await {
             match response {
@@ -383,6 +393,7 @@ async fn send_global_heartbeat(
         }
     }
 
+    // Calculate the median of the max_recieved_members and update the max_committed value
     max_recieved_members.push(c.max_received);
     let loc = max_recieved_members.len() / 2 - 1;
     eprintln!("{:?}", max_recieved_members);

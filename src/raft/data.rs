@@ -47,7 +47,35 @@ impl LogEntry {
                 index,
                 term: _,
             } => *index,
-            _ => todo!("Implement Cas"),
+            LogEntry::Cas {
+                key: _,
+                old_value: _,
+                new_value: _,
+                index,
+                term: _,
+            } => *index,
+        }
+    }
+    pub fn get_term(&self) -> usize {
+        match self {
+            LogEntry::Insert {
+                key: _,
+                data: _,
+                index: _,
+                term,
+            } => *term,
+            LogEntry::Delete {
+                key: _,
+                index: _,
+                term,
+            } => *term,
+            LogEntry::Cas {
+                key,
+                old_value,
+                new_value,
+                index,
+                term,
+            } => *term,
         }
     }
 }
