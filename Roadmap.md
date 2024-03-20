@@ -1,5 +1,5 @@
 ## Roadmap
-1. Add log compaction
-2. Add a more user-friendly setup
-3. Implement Pipelining
-4. Implement group additions / removals
+- [ ] Add log compaction
+- [ ] Add a more user-friendly setup
+- [ ] Implement Pipelining
+- [ ] Implement group additions / removals
