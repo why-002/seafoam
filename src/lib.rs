@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use core::panic;
 use flashmap::{self};
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{Method, Request, Response, StatusCode};
@@ -51,6 +52,15 @@ pub enum Req {
         in_reply_to: u32,
     },
     GetFailed,
+    PipeReads {
+        transactions: Vec<Req>,
+    },
+    PipeWrites {
+        transactions: Vec<Req>,
+    },
+    PipedOk {
+        responses: Vec<Req>,
+    },
 }
 
 pub async fn kv_store(
@@ -62,32 +72,68 @@ pub async fn kv_store(
     match (req.method(), req.uri().path()) {
         // Serve some instructions at /
         (&Method::GET, "/") => Ok(Response::new(full("Hello world"))),
+        (&Method::POST, "/") => {
+            let mut resp = Response::builder();
+            let mut body = req.into_body();
+            let frame_stream = body.frame();
+            let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
+            let obj: Req = serde_json::from_slice(&data).unwrap();
+            let f = state.borrow().clone();
+            let mut frame = Bytes::new();
+            match obj {
+                Req::PipeReads { transactions } => {
+                    let mut responses = Vec::new();
+                    for obj in transactions {
+                        if let Req::Get { key, msg_id } = obj {
+                            let guard = reader.guard();
+                            let val = guard.get(&key);
+                            if let Some(data) = val {
+                                responses.push(Req::GetOk {
+                                    value: data.to_owned(),
+                                    in_reply_to: msg_id,
+                                });
+                            } else {
+                                responses.push(Req::GetFailed);
+                            }
+                        }
+                    }
+                    let st = serde_json::to_string(&Req::PipedOk {
+                        responses: responses,
+                    })
+                    .unwrap();
+                    frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                }
+                _ => {
+                    resp = resp.status(400);
+                }
+            }
+            Ok(resp
+                .body(Full::new(frame).map_err(|never| match never {}).boxed())
+                .unwrap())
+        }
 
         (&Method::POST, "/get") => {
             let mut resp = Response::builder();
             let mut body = req.into_body();
             let frame_stream = body.frame();
             let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
-            let frame;
+            let mut frame = Bytes::new();
             let obj: Req = serde_json::from_slice(&data).unwrap();
 
-            match obj {
-                Req::Get { key, msg_id } => {
-                    let guard = reader.guard();
-                    let val = guard.get(&key);
-                    if let Some(data) = val {
-                        let st = serde_json::to_string(&Req::GetOk {
-                            value: data.to_owned(),
-                            in_reply_to: msg_id,
-                        })
-                        .unwrap();
-                        frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
-                    } else {
-                        frame = Bytes::new();
-                        resp = resp.status(404);
-                    }
+            if let Req::Get { key, msg_id } = obj {
+                let guard = reader.guard();
+                let val = guard.get(&key);
+                if let Some(data) = val {
+                    let st = serde_json::to_string(&Req::GetOk {
+                        value: data.to_owned(),
+                        in_reply_to: msg_id,
+                    })
+                    .unwrap();
+                    frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                } else {
+                    frame = Bytes::new();
+                    resp = resp.status(404);
                 }
-                _ => panic!(),
             }
             Ok(resp
                 .body(Full::new(frame).map_err(|never| match never {}).boxed())
