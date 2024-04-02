@@ -66,7 +66,7 @@ pub enum Req {
 pub async fn kv_store(
     req: Request<hyper::body::Incoming>,
     reader: flashmap::ReadHandle<String, Data>,
-    v: Arc<RwLock<Vec<LogEntry>>>,
+    log: Arc<RwLock<Vec<LogEntry>>>,
     state: watch::Receiver<RaftState>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
     match (req.method(), req.uri().path()) {
@@ -78,34 +78,30 @@ pub async fn kv_store(
             let frame_stream = body.frame();
             let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
             let obj: Req = serde_json::from_slice(&data).unwrap();
-            let f = state.borrow().clone();
             let mut frame = Bytes::new();
-            match obj {
-                Req::PipeReads { transactions } => {
-                    let mut responses = Vec::new();
-                    for obj in transactions {
-                        if let Req::Get { key, msg_id } = obj {
-                            let guard = reader.guard();
-                            let val = guard.get(&key);
-                            if let Some(data) = val {
-                                responses.push(Req::GetOk {
-                                    value: data.to_owned(),
-                                    in_reply_to: msg_id,
-                                });
-                            } else {
-                                responses.push(Req::GetFailed);
-                            }
+            if let Req::PipeReads { transactions } = obj {
+                let mut responses = Vec::new();
+                for obj in transactions {
+                    if let Req::Get { key, msg_id } = obj {
+                        let guard = reader.guard();
+                        let val = guard.get(&key);
+                        if let Some(data) = val {
+                            responses.push(Req::GetOk {
+                                value: data.to_owned(),
+                                in_reply_to: msg_id,
+                            });
+                            continue;
                         }
                     }
-                    let st = serde_json::to_string(&Req::PipedOk {
-                        responses: responses,
-                    })
-                    .unwrap();
-                    frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                    responses.push(Req::GetFailed);
                 }
-                _ => {
-                    resp = resp.status(400);
-                }
+                let st = serde_json::to_vec(&Req::PipedOk {
+                    responses: responses,
+                })
+                .unwrap();
+                frame = Bytes::from(st);
+            } else {
+                resp = resp.status(400);
             }
             Ok(resp
                 .body(Full::new(frame).map_err(|never| match never {}).boxed())
@@ -124,12 +120,12 @@ pub async fn kv_store(
                 let guard = reader.guard();
                 let val = guard.get(&key);
                 if let Some(data) = val {
-                    let st = serde_json::to_string(&Req::GetOk {
+                    let st = serde_json::to_vec(&Req::GetOk {
                         value: data.to_owned(),
                         in_reply_to: msg_id,
                     })
                     .unwrap();
-                    frame = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                    frame = Bytes::from(st);
                 } else {
                     frame = Bytes::new();
                     resp = resp.status(404);
@@ -146,7 +142,7 @@ pub async fn kv_store(
             let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
             let obj: Req = serde_json::from_slice(&data).unwrap();
             let f = state.borrow().clone();
-            let mut writer = v.write().await;
+            let mut writer = log.write().await;
             let mut frame = Bytes::new();
 
             if let Req::Set { key, value, msg_id } = obj.clone() {
@@ -176,7 +172,7 @@ pub async fn kv_store(
             let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
             let obj: Req = serde_json::from_slice(&data).unwrap();
             let f = state.borrow().clone();
-            let mut writer = v.write().await;
+            let mut writer = log.write().await;
             let mut frame = Bytes::new();
             if let Req::Delete {
                 key,
@@ -214,7 +210,7 @@ pub async fn kv_store(
             let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
             let obj: Req = serde_json::from_slice(&data).unwrap();
             let f = state.borrow().clone();
-            let mut writer = v.write().await;
+            let mut writer = log.write().await;
             let mut frame = Bytes::new();
             if let Req::CaS {
                 key,
@@ -289,11 +285,11 @@ fn generate_write_response(
         }
         &RaftState::Leader(term) => match req {
             Req::Set { key, value, msg_id } => {
-                let st = serde_json::to_string(&Req::SetOk {
+                let st = serde_json::to_vec(&Req::SetOk {
                     in_reply_to: msg_id,
                 })
                 .unwrap();
-                let bytes = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                let bytes = Bytes::from(st);
 
                 return (
                     bytes,
@@ -310,12 +306,12 @@ fn generate_write_response(
                 msg_id,
                 error_if_not_key,
             } => {
-                let st = serde_json::to_string(&Req::DeleteOk {
+                let st = serde_json::to_vec(&Req::DeleteOk {
                     in_reply_to: msg_id,
                     key: key.to_owned(),
                 })
                 .unwrap();
-                let bytes = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                let bytes = Bytes::from(st);
                 return (
                     bytes,
                     Some(LogEntry::Delete {
@@ -331,12 +327,12 @@ fn generate_write_response(
                 new_value,
                 msg_id,
             } => {
-                let st = serde_json::to_string(&Req::CasOk {
+                let st = serde_json::to_vec(&Req::CasOk {
                     in_reply_to: msg_id,
                     new_value: new_value.clone(),
                 })
                 .unwrap();
-                let bytes = st.as_bytes().into_iter().map(|byte| *byte).collect();
+                let bytes = Bytes::from(st);
                 return (
                     bytes,
                     Some(LogEntry::Cas {
