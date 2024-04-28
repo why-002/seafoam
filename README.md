@@ -18,7 +18,6 @@ I also have taken a handful of classes focusing on computer architecture, so I w
 ---
 
 ## How it's built
-### Backend
 This project is implemented in Rust using the Tokio runtime for async capabillities. Since I was looking to minimize unnecessary overhead, I chose to use Hyper for handling http requests since many other rust frameworks for handling http requests wrap Hyper anyways.
 
 My storage primitive of choice for this project was flashmap by Cassie343. I chose flashmap because it has lockless reads, and since my goal was to maximize my read throughput, this allowed me to scale the reads effictively linearly with cores.
@@ -67,14 +66,14 @@ $ cargo r --release 6000 6010 127.0.0.1:5010 127.0.0.1:6010
 ## API usage
 The api currently has 5 endpoints:
 1. "/get" POST
-```json
+```javascript
 {
   "key": "foo",
   "msg_id": 0
 }
 ```
 2. "/set" POST
-```json
+```javascript
 {
   "key": "foo",
   "value": {
@@ -85,7 +84,7 @@ The api currently has 5 endpoints:
 }
 ```
 3. "/cas" POST
-```json
+```javascript
 {
   "key": "foo",
   "old_value": "bar",
@@ -97,7 +96,7 @@ The api currently has 5 endpoints:
 }
 ```
 4. "/delete" POST
-```json
+```javascript
 {
   "key": "foo",
   "msg_id": 0,
@@ -105,7 +104,7 @@ The api currently has 5 endpoints:
 }
 ```
 5. "/" POST
-```json
+```javascript
 {
   "transactions": [
     {
