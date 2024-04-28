@@ -38,6 +38,8 @@ Getting the Raft protocol to run properly was a bit of a challenge in the beginn
 - Group membership changes
 - Easy delpoyment with Docker
 
+---
+
 ## Setup and Execution
 ### Run single instance on port 3000:
 ```
