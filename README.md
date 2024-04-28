@@ -64,3 +64,62 @@ $ cd seafoam
 $ cargo r --release 6000 6010 127.0.0.1:5010 127.0.0.1:6010
 ```
 
+## API usage
+The api currently has 5 endpoints:
+1. "/get" POST
+```json
+{
+  "key": "foo",
+  "msg_id": 0
+}
+```
+2. "/set" POST
+```json
+{
+  "key": "foo",
+  "value": {
+    "id": 0
+    "name": "bar"
+  },
+  "msg_id": 0
+}
+```
+3. "/cas" POST
+```json
+{
+  "key": "foo",
+  "old_value": "bar",
+  "new_value": {
+    "id": 0
+    "name": "bar"
+  },
+  "msg_id": 0
+}
+```
+4. "/delete" POST
+```json
+{
+  "key": "foo",
+  "msg_id": 0,
+  "error_if_not_key": false
+}
+```
+5. "/" POST
+```json
+{
+  "transactions": [
+    {
+      "key": "foo",
+      "msg_id": 0
+    },
+    {
+      "key": "bar",
+      "msg_id": 1
+    },
+    {
+      "key": "baz",
+      "msg_id": 2
+    }
+  ]
+}
+```
