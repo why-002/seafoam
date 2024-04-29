@@ -9,7 +9,7 @@ I also have taken a handful of classes focusing on computer architecture, so I w
 ---
 
 ## What it does
-1. It has a few main API endpoints including /get and /set, which accept POST requests for the storage of json data.
+1. It has a few main API endpoints including "/get" and "/set", which accept POST requests for the storage of json data.
 
 2. It then forwards the updates to the leading node where they are then replicated to every node.
 
