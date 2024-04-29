@@ -2,7 +2,7 @@
 A lightweight kv store using a Raft-based protocol for replication and lockless reads to allow for maximum read performance.
 
 ## Inspiration
-When I was reading Robert Vitillo's "Understanding Distributed Systems" I came across a section on the Raft protocol and decided that I wanted to do a project that involved it. I was also enrolled in CSCI 5105: Understanding Distributed Systems at the University of Minnesota at the time, so I took some inspiration from a class project and extended the idea in an implementation in a different language.
+When I was reading Roberto Vitillo's "Understanding Distributed Systems" I came across a section on the Raft protocol and decided that I wanted to do a project that involved it. I was also enrolled in CSCI 5105: Understanding Distributed Systems at the University of Minnesota at the time, so I took some inspiration from a class project and extended the idea in an implementation in a different language.
 
 I also have taken a handful of classes focusing on computer architecture, so I wanted to see how much optimization I could do in a lower-level language to boost my system's performance.
 
