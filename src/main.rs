@@ -1,22 +1,55 @@
 use hyper::server::conn::http1;
+use std::borrow::Borrow;
 use std::env;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use tonic::transport::Server;
 
-use flashmap;
+use flashmap::{self, ReadHandle};
 use hyper::service::service_fn;
 use hyper::Request;
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{watch, RwLock};
+use tonic::Response;
 
 use seafoam::{
     kv_store,
-    raft::{log_manager, raft_state_manager, RaftCore, RaftState},
+    raft::{log_manager, raft_state_manager, Data, RaftCore, RaftState},
 };
 
-//#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+pub mod grpc {
+    tonic::include_proto!("seafoam");
+}
+
+use grpc::seafoam_server::{Seafoam, SeafoamServer};
+use grpc::*;
+
+pub struct MyServer {
+    db: ReadHandle<String, Data>,
+}
+
+#[tonic::async_trait]
+impl Seafoam for MyServer {
+    async fn get(
+        &self,
+        request: tonic::Request<GetRequest>,
+    ) -> Result<Response<GetReply>, tonic::Status> {
+        let key: String = request.into_inner().key;
+        let data = self.db.guard().get(&key).cloned();
+        match data {
+            None => Ok(Response::new(GetReply { value: None })),
+            data => {
+                let resp = GetReply {
+                    value: Some(serde_json::to_string(&data).unwrap()),
+                };
+                Ok(Response::new(resp))
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = env::args().collect();
@@ -58,18 +91,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     drop(writer);
 
+    let (writer, reader) = flashmap::new();
+    // This is wyatt's bad idea
+
+    let greeter = MyServer { db: reader.clone() };
+
+    tokio::spawn(async {
+        let add = "[::1]:50051".parse().unwrap();
+        Server::builder()
+            .add_service(SeafoamServer::new(greeter))
+            .serve(add)
+            .await
+    })
+    .await?;
+    // This is normal code
+
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on http://{}", addr);
 
-    let (writer, reader) = flashmap::new();
-
     let l = log.clone();
     let i = internal_state.clone();
-    let _ = tokio::task::spawn(async move { log_manager(l, writer, i.clone()).await });
 
-    let s = state_receiver.clone();
+    let _ = tokio::task::spawn(log_manager(l, writer, i.clone()));
     tokio::task::spawn(raft_state_manager(
-        s,
+        state_receiver.clone(),
         state_sender,
         internal_state.clone(),
         log.clone(),
@@ -87,6 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             kv_store(req, new_reader.clone(), v.clone(), s.clone())
         });
         let http = http1::Builder::new();
+
         tokio::task::spawn(async move {
             if let Err(err) = http.serve_connection(io, service).await {
                 println!("Error serving connection: {:?}", err);
