@@ -13,6 +13,20 @@ class QuickstartUser(FastHttpUser):
     def get(self):
         if len(self.current_keys) != 0:
             self.client.post("/get", json={"key": random.choice(self.current_keys), "msg_id" : 0})
+            self.client.post("/get", json={"key": random.choice(self.current_keys), "msg_id" : 0})
+            self.client.post("/get", json={"key": random.choice(self.current_keys), "msg_id" : 0})
+            self.client.post("/get", json={"key": random.choice(self.current_keys), "msg_id" : 0})
+            self.client.post("/get", json={"key": random.choice(self.current_keys), "msg_id" : 0})
+            # self.client.post("/get", json={"key": random.choice(self.current_keys), "msg_id" : 0})
+            # self.client.post("/get", json={"key": random.choice(self.current_keys), "msg_id" : 0})
+            # self.client.post("/get", json={"key": random.choice(self.current_keys), "msg_id" : 0})
+            # self.client.post("/get", json={"key": random.choice(self.current_keys), "msg_id" : 0})
+            # self.client.post("/get", json={"key": random.choice(self.current_keys), "msg_id" : 0})
+            # self.client.post("/", json={"transactions": [{"key": random.choice(self.current_keys), "msg_id" : i} for i in range(16)]})
+            # self.client.post("/", json={"transactions": [{"key": random.choice(self.current_keys), "msg_id" : i} for i in range(16)]})
+            # self.client.post("/", json={"transactions": [{"key": random.choice(self.current_keys), "msg_id" : i} for i in range(16)]})
+            # self.client.post("/", json={"transactions": [{"key": random.choice(self.current_keys), "msg_id" : i} for i in range(16)]})
+            # self.client.post("/", json={"transactions": [{"key": random.choice(self.current_keys), "msg_id" : i} for i in range(16)]})
 
     @task
     def set(self):

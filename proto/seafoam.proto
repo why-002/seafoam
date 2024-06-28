@@ -1,0 +1,14 @@
+syntax = "proto3";
+package seafoam;
+
+service Seafoam {
+    rpc Get (GetRequest) returns (GetReply);
+}
+
+message GetRequest {
+    string key = 1;
+}
+
+message GetReply {
+    optional string value = 1;
+}

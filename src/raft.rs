@@ -11,6 +11,7 @@ use tokio::sync::{
 };
 
 mod data;
+mod log;
 mod requests;
 mod responses;
 pub use self::data::{Data, LogEntry, RaftCore, RaftState};
@@ -27,6 +28,7 @@ pub async fn log_manager(
     let mut current_index = 0;
     let mut writer = data;
     loop {
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
         let c = core.read().await;
         let new_index = c.max_committed;
         drop(c);
@@ -39,7 +41,7 @@ pub async fn log_manager(
             drop(log_handle);
 
             let mut write_guard = writer.guard();
-
+            eprintln!("{}", new_entries.len());
             for e in new_entries {
                 match e {
                     LogEntry::Insert {
