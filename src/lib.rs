@@ -1,8 +1,6 @@
 use bytes::Bytes;
 use core::panic;
-use flashmap::{self};
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
-use hyper::{Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::{ops::DerefMut, sync::Arc};
 use tokio::sync::{
@@ -12,6 +10,16 @@ use tokio::sync::{
 
 pub mod raft;
 use raft::{Data, LogEntry, RaftState};
+
+pub mod grpc {
+    tonic::include_proto!("seafoam");
+}
+use crate::raft::RaftCore;
+use flashmap::{self, ReadHandle};
+use grpc::seafoam_client::SeafoamClient;
+use grpc::seafoam_server::{Seafoam, SeafoamServer};
+use grpc::*;
+use tonic::{Request, Response};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -63,289 +71,152 @@ pub enum Req {
     },
 }
 
-pub async fn kv_store(
-    req: Request<hyper::body::Incoming>,
-    reader: flashmap::ReadHandle<String, Data>,
-    log: Arc<RwLock<Vec<LogEntry>>>,
-    state: watch::Receiver<RaftState>,
-) -> Result<Response<BoxBody<Bytes, hyper::Error>>, hyper::Error> {
-    match (req.method(), req.uri().path()) {
-        // Serve some instructions at /
-        (&Method::GET, "/") => Ok(Response::new(full("Hello world"))),
-        (&Method::POST, "/") => {
-            let mut resp = Response::builder();
-            let mut body = req.into_body();
-            let frame_stream = body.frame();
-            let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
-            let obj: Req = serde_json::from_slice(&data).unwrap();
-            let mut frame = Bytes::new();
-            if let Req::PipeReads { transactions } = obj {
-                let mut responses = Vec::new();
-                for obj in transactions {
-                    if let Req::Get { key, msg_id } = obj {
-                        let guard = reader.guard();
-                        let val = guard.get(&key);
-                        if let Some(data) = val {
-                            responses.push(Req::GetOk {
-                                value: data.to_owned(),
-                                in_reply_to: msg_id,
-                            });
-                            continue;
-                        }
-                    }
-                    responses.push(Req::GetFailed);
-                }
-                let st = serde_json::to_vec(&Req::PipedOk {
-                    responses: responses,
-                })
-                .unwrap();
-                frame = Bytes::from(st);
-            } else {
-                resp = resp.status(400);
+pub struct MyServer {
+    pub db: ReadHandle<String, Data>,
+    pub log: Arc<RwLock<Vec<LogEntry>>>,
+    pub internal_state: Arc<RwLock<RaftCore>>,
+    pub state_receiver: watch::Receiver<RaftState>,
+}
+
+#[tonic::async_trait]
+impl Seafoam for MyServer {
+    async fn get(
+        &self,
+        request: tonic::Request<GetRequest>,
+    ) -> Result<Response<GetReply>, tonic::Status> {
+        let key: String = request.into_inner().key;
+        let data = self.db.guard().get(&key).cloned();
+
+        match data {
+            None => Ok(Response::new(GetReply { value: None })),
+            data => {
+                let resp = GetReply {
+                    value: Some(serde_json::to_string(&data).unwrap()),
+                };
+                Ok(Response::new(resp))
             }
-            Ok(resp
-                .body(Full::new(frame).map_err(|never| match never {}).boxed())
-                .unwrap())
         }
+    }
 
-        (&Method::POST, "/get") => {
-            let mut resp = Response::builder();
-            let mut body = req.into_body();
-            let frame_stream = body.frame();
-            let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
-            let mut frame = Bytes::new();
-            let obj: Req = serde_json::from_slice(&data).unwrap();
+    async fn set(
+        &self,
+        request: tonic::Request<SetRequest>,
+    ) -> Result<Response<SetReply>, tonic::Status> {
+        // Make sure to implement proper logic to forward the request to the leader of the Raft cluster
+        let state = self.state_receiver.borrow().clone();
+        match state {
+            RaftState::Leader(term) => {
+                let message = request.into_inner();
+                let key = message.key;
+                let value = message.value;
+                let mut write_lock = self.log.write().await;
 
-            if let Req::Get { key, msg_id } = obj {
-                let guard = reader.guard();
-                let val = guard.get(&key);
-                if let Some(data) = val {
-                    let st = serde_json::to_vec(&Req::GetOk {
-                        value: data.to_owned(),
-                        in_reply_to: msg_id,
-                    })
+                let index = write_lock.len() + 1;
+                let log_entry = LogEntry::Insert {
+                    key: key,
+                    data: serde_json::from_str(&value).unwrap(),
+                    index: index,
+                    term: term,
+                };
+
+                write_lock.push(log_entry);
+                drop(write_lock);
+
+                // Figure out an optimal way to trigger a response
+                // while self.internal_state.read().await.max_committed < index {
+                //     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                // }
+
+                Ok(Response::new(SetReply {}))
+            }
+            RaftState::Follower(_, Some(leader), _) => {
+                let leader = leader.clone();
+                let mut client = SeafoamClient::connect(format!("http://{}", leader))
+                    .await
                     .unwrap();
-                    frame = Bytes::from(st);
-                } else {
-                    frame = Bytes::new();
-                    resp = resp.status(404);
-                }
+                client.set(request).await
             }
-            Ok(resp
-                .body(Full::new(frame).map_err(|never| match never {}).boxed())
-                .unwrap())
-        }
-        (&Method::POST, "/set") => {
-            let mut resp = Response::builder();
-            let mut body = req.into_body();
-            let frame_stream = body.frame();
-            let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
-            let obj: Req = serde_json::from_slice(&data).unwrap();
-            let f = state.borrow().clone();
-            let mut writer = log.write().await;
-            let mut frame = Bytes::new();
-
-            if let Req::Set { key, value, msg_id } = obj.clone() {
-                let (f, log) = generate_write_response(
-                    obj,
-                    &f,
-                    "/set".to_string(),
-                    &mut resp,
-                    writer.len() + 1,
-                );
-                frame = f;
-                if let Some(log) = log {
-                    writer.push(log);
-                }
-            } else {
-                resp = resp.status(400);
-            }
-
-            Ok(resp
-                .body(Full::new(frame).map_err(|never| match never {}).boxed())
-                .unwrap())
-        }
-        (&Method::POST, "/delete") => {
-            let mut resp = Response::builder();
-            let mut body = req.into_body();
-            let frame_stream = body.frame();
-            let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
-            let obj: Req = serde_json::from_slice(&data).unwrap();
-            let f = state.borrow().clone();
-            let mut writer = log.write().await;
-            let mut frame = Bytes::new();
-            if let Req::Delete {
-                key,
-                msg_id: _,
-                error_if_not_key,
-            } = obj.clone()
-            {
-                let (f, log) = generate_write_response(
-                    obj,
-                    &f,
-                    "/delete".to_string(),
-                    &mut resp,
-                    writer.len() + 1,
-                );
-                frame = f;
-                if let Some(log) = log {
-                    if reader.guard().contains_key(&key) || !error_if_not_key {
-                        writer.push(log);
-                    } else {
-                        resp = resp.status(400);
-                        frame = Bytes::new();
-                    }
-                }
-            } else {
-                resp = resp.status(400);
-            }
-            Ok(resp
-                .body(Full::new(frame).map_err(|never| match never {}).boxed())
-                .unwrap())
-        }
-        (&Method::POST, "/cas") => {
-            let mut resp = Response::builder();
-            let mut body = req.into_body();
-            let frame_stream = body.frame();
-            let data = frame_stream.await.unwrap().unwrap().into_data().unwrap();
-            let obj: Req = serde_json::from_slice(&data).unwrap();
-            let f = state.borrow().clone();
-            let mut writer = log.write().await;
-            let mut frame = Bytes::new();
-            if let Req::CaS {
-                key,
-                old_value,
-                new_value,
-                msg_id,
-            } = obj.clone()
-            {
-                let (f, log) = generate_write_response(
-                    obj,
-                    &f,
-                    "/cas".to_string(),
-                    &mut resp,
-                    writer.len() + 1,
-                );
-                frame = f;
-                if let Some(log) = log {
-                    if reader.guard().contains_key(&key) {
-                        writer.push(log);
-                    } else {
-                        resp = resp.status(400);
-                        frame = Bytes::new();
-                    }
-                }
-            } else {
-                resp = resp.status(400);
-            }
-            Ok(resp
-                .body(Full::new(frame).map_err(|never| match never {}).boxed())
-                .unwrap())
-        }
-        // Return the 404 Not Found for other routes.
-        _ => {
-            let mut not_found = Response::new(empty());
-            *not_found.status_mut() = StatusCode::NOT_FOUND;
-            Ok(not_found)
+            _ => Err(tonic::Status::unavailable("No leader currently elected")),
         }
     }
-}
 
-fn empty() -> BoxBody<Bytes, hyper::Error> {
-    Empty::<Bytes>::new()
-        .map_err(|never| match never {})
-        .boxed()
-}
+    async fn delete(
+        &self,
+        request: tonic::Request<DeleteRequest>,
+    ) -> Result<Response<DeleteReply>, tonic::Status> {
+        let state = self.state_receiver.borrow().clone();
+        match state {
+            RaftState::Leader(term) => {
+                let message = request.into_inner();
+                let key = message.key;
+                let mut write_lock = self.log.write().await;
 
-fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
-    Full::new(chunk.into())
-        .map_err(|never| match never {})
-        .boxed()
-}
+                let index = write_lock.len() + 1;
+                let log_entry = LogEntry::Delete {
+                    key: key,
+                    index: index,
+                    term: term,
+                };
 
-fn generate_write_response(
-    req: Req,
-    state: &RaftState,
-    uri: String,
-    mut resp: &mut http::response::Builder,
-    size: usize,
-) -> (Bytes, Option<LogEntry>) {
-    match state {
-        &RaftState::Canidate(_) => {
-            *resp = Response::builder().status(500);
+                write_lock.push(log_entry);
+                drop(write_lock);
+
+                // Note: The same consideration about optimal response triggering applies here
+                // as in the set function. You might want to implement a mechanism to ensure
+                // the delete has been committed before responding.
+
+                Ok(Response::new(DeleteReply {}))
+            }
+            RaftState::Follower(_, Some(leader), _) => {
+                let leader = leader.clone();
+                let mut client = SeafoamClient::connect(format!("http://{}", leader))
+                    .await
+                    .unwrap();
+                client.delete(request).await
+            }
+            _ => Err(tonic::Status::unavailable("No leader currently elected")),
         }
-        &RaftState::Follower(_, addr, _) => {
-            if let Some(addr) = addr {
-                *resp = Response::builder()
-                    .header("Location", "http://".to_owned() + &addr.to_string() + &uri)
-                    .status(307);
-            } else {
-                *resp = Response::builder().status(500);
-            }
-        }
-        &RaftState::Leader(term) => match req {
-            Req::Set { key, value, msg_id } => {
-                let st = serde_json::to_vec(&Req::SetOk {
-                    in_reply_to: msg_id,
-                })
-                .unwrap();
-                let bytes = Bytes::from(st);
-
-                return (
-                    bytes,
-                    Some(LogEntry::Insert {
-                        key: key,
-                        data: value,
-                        index: size,
-                        term: term,
-                    }),
-                );
-            }
-            Req::Delete {
-                key,
-                msg_id,
-                error_if_not_key,
-            } => {
-                let st = serde_json::to_vec(&Req::DeleteOk {
-                    in_reply_to: msg_id,
-                    key: key.to_owned(),
-                })
-                .unwrap();
-                let bytes = Bytes::from(st);
-                return (
-                    bytes,
-                    Some(LogEntry::Delete {
-                        key: key,
-                        index: size,
-                        term: term,
-                    }),
-                );
-            }
-            Req::CaS {
-                key,
-                old_value,
-                new_value,
-                msg_id,
-            } => {
-                let st = serde_json::to_vec(&Req::CasOk {
-                    in_reply_to: msg_id,
-                    new_value: new_value.clone(),
-                })
-                .unwrap();
-                let bytes = Bytes::from(st);
-                return (
-                    bytes,
-                    Some(LogEntry::Cas {
-                        key: key,
-                        old_value: old_value,
-                        new_value: new_value,
-                        index: size,
-                        term: term,
-                    }),
-                );
-            }
-            _ => {}
-        },
     }
-    return (Bytes::new(), None);
+
+    async fn cas(
+        &self,
+        request: tonic::Request<CasRequest>,
+    ) -> Result<Response<CasReply>, tonic::Status> {
+        let state = self.state_receiver.borrow().clone();
+        match state {
+            RaftState::Leader(term) => {
+                let message = request.into_inner();
+                let key = message.key;
+                let old_value: Data = serde_json::from_str(&message.old_value).unwrap();
+                let new_value: Data = serde_json::from_str(&message.new_value).unwrap();
+
+                let mut write_lock = self.log.write().await;
+
+                let index = write_lock.len() + 1;
+                let log_entry = LogEntry::Cas {
+                    key: key,
+                    old_value: old_value,
+                    new_value: new_value,
+                    index: index,
+                    term: term,
+                };
+
+                write_lock.push(log_entry);
+                drop(write_lock);
+
+                // Note: As with set and delete, you might want to implement a mechanism
+                // to ensure the CaS has been committed before responding.
+
+                Ok(Response::new(CasReply { success: true }))
+            }
+            RaftState::Follower(_, Some(leader), _) => {
+                let leader = leader.clone();
+                let mut client = SeafoamClient::connect(format!("http://{}", leader))
+                    .await
+                    .unwrap();
+                client.cas(request).await
+            }
+            _ => Err(tonic::Status::unavailable("No leader currently elected")),
+        }
+    }
 }

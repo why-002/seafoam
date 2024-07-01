@@ -4,8 +4,8 @@ package seafoam;
 service Seafoam {
     rpc Get (GetRequest) returns (GetReply);
     rpc Set (SetRequest) returns (SetReply);
-    // rpc Cas (CasRequest) returns (CasReply);
-    // rpc Delete (DeleteRequest) returns (DeleteReply);
+    rpc Cas (CasRequest) returns (CasReply);
+    rpc Delete (DeleteRequest) returns (DeleteReply);
 }
 
 message GetRequest {
@@ -22,5 +22,23 @@ message SetRequest {
 }
 
 message SetReply {
-    
+
+}
+
+message DeleteRequest {
+  string key = 1;
+}
+
+message DeleteReply {
+  // You might want to add fields here if you need to return any information after a delete operation
+}
+
+message CasRequest {
+  string key = 1;
+  string old_value = 2;
+  string new_value = 3;
+}
+
+message CasReply {
+  bool success = 1;
 }
