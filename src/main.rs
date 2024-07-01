@@ -1,11 +1,14 @@
 use hyper::server::conn::http1;
+use seafoam::raft::LogEntry;
 use std::borrow::Borrow;
 use std::env;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::time::Instant;
 use tonic::transport::Server;
 
 use flashmap::{self, ReadHandle};
+use grpc::seafoam_client::SeafoamClient;
 use hyper::service::service_fn;
 use hyper::Request;
 use hyper_util::rt::TokioIo;
@@ -28,6 +31,9 @@ use grpc::*;
 
 pub struct MyServer {
     db: ReadHandle<String, Data>,
+    log: Arc<RwLock<Vec<LogEntry>>>,
+    internal_state: Arc<RwLock<RaftCore>>,
+    state_receiver: watch::Receiver<RaftState>,
 }
 
 #[tonic::async_trait]
@@ -37,7 +43,13 @@ impl Seafoam for MyServer {
         request: tonic::Request<GetRequest>,
     ) -> Result<Response<GetReply>, tonic::Status> {
         let key: String = request.into_inner().key;
+        let start = Instant::now();
         let data = self.db.guard().get(&key).cloned();
+        let end = start.elapsed().as_millis();
+        if end > 10 {
+            println!("{}", end);
+        }
+
         match data {
             None => Ok(Response::new(GetReply { value: None })),
             data => {
@@ -46,6 +58,48 @@ impl Seafoam for MyServer {
                 };
                 Ok(Response::new(resp))
             }
+        }
+    }
+
+    async fn set(
+        &self,
+        request: tonic::Request<SetRequest>,
+    ) -> Result<Response<SetReply>, tonic::Status> {
+        // Make sure to implement proper logic to forward the request to the leader of the Raft cluster
+        let state = self.state_receiver.borrow().clone();
+        match state {
+            RaftState::Leader(term) => {
+                let message = request.into_inner();
+                let key = message.key;
+                let value = message.value;
+                let mut write_lock = self.log.write().await;
+
+                let index = write_lock.len() + 1;
+                let log_entry = LogEntry::Insert {
+                    key: key,
+                    data: serde_json::from_str(&value).unwrap(),
+                    index: index,
+                    term: term,
+                };
+
+                write_lock.push(log_entry);
+                drop(write_lock);
+
+                // Figure out an optimal way to trigger a response
+                // while self.internal_state.read().await.max_committed < index {
+                //     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                // }
+
+                Ok(Response::new(SetReply {}))
+            }
+            RaftState::Follower(_, Some(leader), _) => {
+                let leader = leader.clone();
+                let mut client = SeafoamClient::connect(format!("http://{}", leader))
+                    .await
+                    .unwrap();
+                client.set(request).await
+            }
+            _ => Err(tonic::Status::unavailable("No leader currently elected")),
         }
     }
 }
@@ -68,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = SocketAddr::from_str(&args[i]).expect("Invalid member address");
     }
 
-    let log = Arc::new(RwLock::new(Vec::new()));
+    let log: Arc<RwLock<Vec<LogEntry>>> = Arc::new(RwLock::new(Vec::new()));
     let (state_sender, state_receiver) = watch::channel(RaftState::Follower(0, None, true));
 
     let internal_state = Arc::new(RwLock::new(RaftCore {
@@ -93,8 +147,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let (writer, reader) = flashmap::new();
     // This is wyatt's bad idea
-
-    let greeter = MyServer { db: reader.clone() };
+    let greeter = MyServer {
+        db: reader.clone(),
+        log: log.clone(),
+        internal_state: internal_state.clone(),
+        state_receiver: state_receiver.clone(),
+    };
 
     tokio::spawn(async {
         let add = "[::1]:50051".parse().unwrap();
