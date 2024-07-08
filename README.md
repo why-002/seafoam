@@ -45,36 +45,36 @@ Getting the Raft protocol to run properly was a bit of a challenge in the beginn
 ```
 $ cd seafoam
 
-$ cargo r --release 3000 3010 // run single instance on port 3000
+$ cargo r --release --bin seafoam-server 3000 3010 // run single instance on port 3000
 ```
 
 ### Run three instances on localhost:
 ```
 $ cd seafoam
 
-$ cargo r --release 3000 3010 127.0.0.1:5010 127.0.0.1:6010
+$ cargo r --release --bin seafoam-server 3000 3010 127.0.0.1:5010 127.0.0.1:6010
 ```
 ```
 $ cd seafoam
 
-$ cargo r --release 5000 5010 127.0.0.1:5010 127.0.0.1:6010
+$ cargo r --release --bin seafoam-server 5000 5010 127.0.0.1:5010 127.0.0.1:6010
 ```
 ```
 $ cd seafoam
 
-$ cargo r --release 6000 6010 127.0.0.1:5010 127.0.0.1:6010
+$ cargo r --release --bin seafoam-server 6000 6010 127.0.0.1:5010 127.0.0.1:6010
 ```
 
 ## API usage
-The api currently has 5 endpoints:
-1. "/get" POST
+The api currently has 4 gRPC endpoints:
+1. Get
 ```javascript
 {
   "key": "foo",
   "msg_id": 0
 }
 ```
-2. "/set" POST
+2. Set
 ```javascript
 {
   "key": "foo",
@@ -85,7 +85,7 @@ The api currently has 5 endpoints:
   "msg_id": 0
 }
 ```
-3. "/cas" POST
+3. Cas
 ```javascript
 {
   "key": "foo",
@@ -97,30 +97,11 @@ The api currently has 5 endpoints:
   "msg_id": 0
 }
 ```
-4. "/delete" POST
+4. Delete
 ```javascript
 {
   "key": "foo",
   "msg_id": 0,
   "error_if_not_key": false
-}
-```
-5. "/" POST
-```javascript
-{
-  "transactions": [
-    {
-      "key": "foo",
-      "msg_id": 0
-    },
-    {
-      "key": "bar",
-      "msg_id": 1
-    },
-    {
-      "key": "baz",
-      "msg_id": 2
-    }
-  ]
 }
 ```
