@@ -1,22 +1,26 @@
 use hyper::server::conn::http1;
+use seafoam::raft::LogEntry;
+use std::borrow::Borrow;
 use std::env;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::time::Instant;
+use tonic::transport::Server;
 
-use flashmap;
+use flashmap::{self, ReadHandle};
 use hyper::service::service_fn;
 use hyper::Request;
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{watch, RwLock};
+use tonic::Response;
 
-use seafoam::{
-    kv_store,
-    raft::{log_manager, raft_state_manager, RaftCore, RaftState},
-};
+use seafoam::raft::{log_manager, raft_state_manager, Data, RaftCore, RaftState};
 
-//#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+use seafoam::grpc::seafoam_server::SeafoamServer;
+use seafoam::MyServer;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = env::args().collect();
@@ -35,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = SocketAddr::from_str(&args[i]).expect("Invalid member address");
     }
 
-    let log = Arc::new(RwLock::new(Vec::new()));
+    let log: Arc<RwLock<Vec<LogEntry>>> = Arc::new(RwLock::new(Vec::new()));
     let (state_sender, state_receiver) = watch::channel(RaftState::Follower(0, None, true));
 
     let internal_state = Arc::new(RwLock::new(RaftCore {
@@ -58,39 +62,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     drop(writer);
 
-    let listener = TcpListener::bind(addr).await?;
-    println!("Listening on http://{}", addr);
-
     let (writer, reader) = flashmap::new();
 
     let l = log.clone();
     let i = internal_state.clone();
-    let _ = tokio::task::spawn(async move { log_manager(l, writer, i.clone()).await });
 
-    let s = state_receiver.clone();
+    let _ = tokio::task::spawn(log_manager(l, writer, i.clone()));
     tokio::task::spawn(raft_state_manager(
-        s,
+        state_receiver.clone(),
         state_sender,
         internal_state.clone(),
         log.clone(),
         args[2].parse::<u16>().unwrap(),
     ));
 
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let io = TokioIo::new(stream);
+    // This is wyatt's bad idea
+    let greeter = MyServer {
+        db: reader.clone(),
+        log: log.clone(),
+        internal_state: internal_state.clone(),
+        state_receiver: state_receiver.clone(),
+    };
 
-        let new_reader = reader.clone();
-        let v = log.clone();
-        let s = state_receiver.clone();
-        let service = service_fn(move |req: Request<hyper::body::Incoming>| {
-            kv_store(req, new_reader.clone(), v.clone(), s.clone())
-        });
-        let http = http1::Builder::new();
-        tokio::task::spawn(async move {
-            if let Err(err) = http.serve_connection(io, service).await {
-                println!("Error serving connection: {:?}", err);
-            }
-        });
-    }
+    println!("Listening on http://{}", addr);
+    Ok(tokio::spawn(async move {
+        let addr = format!("[::1]:{}", client_port);
+        let add = addr.parse().unwrap();
+        Server::builder()
+            .add_service(SeafoamServer::new(greeter))
+            .serve(add)
+            .await
+    })
+    .await??)
+    // This is normal code
 }

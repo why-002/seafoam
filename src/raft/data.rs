@@ -9,6 +9,7 @@ pub enum Data {
     Int(u32),
     Array(Vec<Data>),
     Map(HashMap<String, Data>),
+    Bytes(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
