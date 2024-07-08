@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let TASKS_LIMIT = 128;
     let semaphore = Arc::new(Semaphore::new(TASKS_LIMIT));
 
-    for _ in 0..4_000 {
+    for _ in 0..400_000 {
         let permit = semaphore.clone().acquire_owned().await.unwrap();
         tokio::spawn(async move {
             loop {
