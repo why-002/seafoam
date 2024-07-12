@@ -9,7 +9,7 @@ I also have taken a handful of classes focusing on computer architecture, so I w
 ---
 
 ## What it does
-1. It has a few main API endpoints including "/get" and "/set", which accept POST requests for the storage of json data.
+1. It has a few main gRPC endpoints for expected functions such as getting and setting.
 
 2. It then forwards the updates to the leading node where they are then replicated to every node.
 
@@ -18,7 +18,7 @@ I also have taken a handful of classes focusing on computer architecture, so I w
 ---
 
 ## How it's built
-This project is implemented in Rust using the Tokio runtime for async capabillities. Since I was looking to minimize unnecessary overhead, I chose to use Hyper for handling http requests since many other rust frameworks for handling http requests wrap Hyper anyways.
+This project is implemented in Rust using the Tokio runtime for async capabillities. Since I was looking to minimize unnecessary overhead, I chose to use Hyper for handling http requests since many other rust frameworks for handling http requests wrap Hyper anyways. I then made the decision to change over to Tonic, a gRPC library, which uses Hyper under the hood, but has better performance than my previous design as it uses http 2.
 
 My storage primitive of choice for this project was flashmap by Cassie343. I chose flashmap because it has lockless reads, and since my goal was to maximize my read throughput, this allowed me to scale the reads effictively linearly with cores.
 
@@ -71,7 +71,6 @@ The api currently has 4 gRPC endpoints:
 ```javascript
 {
   "key": "foo",
-  "msg_id": 0
 }
 ```
 2. Set
@@ -81,8 +80,7 @@ The api currently has 4 gRPC endpoints:
   "value": {
     "id": 0
     "name": "bar"
-  },
-  "msg_id": 0
+  }
 }
 ```
 3. Cas
@@ -94,14 +92,11 @@ The api currently has 4 gRPC endpoints:
     "id": 0
     "name": "bar"
   },
-  "msg_id": 0
 }
 ```
 4. Delete
 ```javascript
 {
-  "key": "foo",
-  "msg_id": 0,
-  "error_if_not_key": false
+  "key": "foo"
 }
 ```
