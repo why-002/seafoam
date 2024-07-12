@@ -84,18 +84,18 @@ impl Seafoam for MyServer {
         &self,
         request: tonic::Request<GetRequest>,
     ) -> Result<Response<GetReply>, tonic::Status> {
-        let key: String = request.into_inner().key;
-        let data = self.db.guard().get(&key).cloned();
-
-        match data {
-            None => Ok(Response::new(GetReply { value: None })),
-            data => {
-                let resp = GetReply {
-                    value: Some(serde_json::to_string(&data).unwrap()),
-                };
-                Ok(Response::new(resp))
+        let keys: Vec<String> = request.into_inner().keys;
+        let mut resp = Vec::new();
+        for key in keys {
+            let data = self.db.guard().get(&key).cloned();
+            match data {
+                None => resp.push(String::new()),
+                data => {
+                    resp.push(serde_json::to_string(&data).unwrap_or(String::new()));
+                }
             }
         }
+        return Ok(Response::new(GetReply { values: resp }));
     }
 
     async fn set(

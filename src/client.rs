@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut client = SeafoamClient::new(channel);
                     for i in 0..24 {
                         let request = tonic::Request::new(GetRequest {
-                            key: "hello".to_string(),
+                            keys: vec!["hello".to_string()],
                         });
                         let response = client.get(request).await.unwrap();
                     }

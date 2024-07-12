@@ -9,11 +9,11 @@ service Seafoam {
 }
 
 message GetRequest {
-    string key = 1;
+    repeated string keys = 1;
 }
 
 message GetReply {
-    optional string value = 1;
+    repeated string values = 1;
 }
 
 message SetRequest {
