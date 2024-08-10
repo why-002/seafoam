@@ -1,5 +1,4 @@
 use hyper::server::conn::http1;
-use seafoam::raft::LogEntry;
 use std::borrow::Borrow;
 use std::env;
 use std::net::SocketAddr;
@@ -13,13 +12,12 @@ use hyper::Request;
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 use tonic::Response;
 
-use seafoam::raft::{log_manager, raft_state_manager, Data, RaftCore, RaftState};
+use seafoam::raft::{log_manager, raft_state_manager, RaftCore, RaftState};
 
-use seafoam::grpc::seafoam_server::SeafoamServer;
-use seafoam::MyServer;
+use seafoam::grpc::{seafoam_server::SeafoamServer, LogEntry};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -40,9 +38,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let log: Arc<RwLock<Vec<LogEntry>>> = Arc::new(RwLock::new(Vec::new()));
-    let (state_sender, state_receiver) = watch::channel(RaftState::Follower(0, None, true));
+    let channels = watch::channel(RaftState::Follower(0, None, true));
 
-    let internal_state = Arc::new(RwLock::new(RaftCore {
+    let raft_state_sender = Arc::new(Mutex::new(channels.0));
+    let raft_state_receiver = channels.1.clone();
+
+    let core_state = Arc::new(RwLock::new(RaftCore {
         max_committed: 0,
         max_received: 0,
         current_term: 1,
@@ -53,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], client_port));
 
-    let mut writer = internal_state.write().await;
+    let mut writer = core_state.write().await;
     let max = args.len();
     let mut i = 3;
     while i < max {
@@ -65,23 +66,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (writer, reader) = flashmap::new();
 
     let l = log.clone();
-    let i = internal_state.clone();
+    let i = core_state.clone();
 
     let _ = tokio::task::spawn(log_manager(l, writer, i.clone()));
     tokio::task::spawn(raft_state_manager(
-        state_receiver.clone(),
-        state_sender,
-        internal_state.clone(),
+        raft_state_receiver.clone(),
+        raft_state_sender.clone(),
+        core_state.clone(),
         log.clone(),
         args[2].parse::<u16>().unwrap(),
     ));
 
-    // This is wyatt's bad idea
-    let greeter = MyServer {
+    let kv_store = seafoam::Server {
         db: reader.clone(),
         log: log.clone(),
-        internal_state: internal_state.clone(),
-        state_receiver: state_receiver.clone(),
+        core_state: core_state.clone(),
+        state_receiver: raft_state_receiver.clone(),
+        state_sender: raft_state_sender.clone(),
     };
 
     println!("Listening on http://{}", addr);
@@ -89,10 +90,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let addr = format!("[::1]:{}", client_port);
         let add = addr.parse().unwrap();
         Server::builder()
-            .add_service(SeafoamServer::new(greeter))
+            .add_service(SeafoamServer::new(kv_store))
             .serve(add)
             .await
     })
     .await??)
-    // This is normal code
 }

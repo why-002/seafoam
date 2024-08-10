@@ -1,10 +1,12 @@
 use anyhow::Error;
 use flashmap::{self};
+use heartbeat_reply::HeartbeatType;
 use rand::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tokio::sync::{
     watch::{self},
     RwLock,
@@ -12,16 +14,75 @@ use tokio::sync::{
 
 mod data;
 mod requests;
-mod responses;
-pub use self::data::{Data, LogEntry, RaftCore, RaftState};
+use crate::{
+    grpc::{self, *},
+    HeartbeatRequest, Object, RequestVoteReply, RequestVoteRequest,
+};
+
+pub use self::data::{RaftCore, RaftState};
 pub use self::requests::RaftManagementRequest;
 use self::requests::{send_heartbeat, send_vote_request};
-use self::responses::handle_management_request;
-pub use self::responses::RaftManagementResponse;
+
+impl LogEntry {
+    pub fn get_type(&self) -> LogType {
+        LogType::try_from(self.ltype).expect("Invalid Logtype")
+    }
+    pub fn get_index(&self) -> usize {
+        self.index as usize
+    }
+    pub fn get_term(&self) -> usize {
+        self.term as usize
+    }
+    pub fn set_term(&mut self, term: usize) {
+        self.term = term as u64;
+    }
+    pub fn create_insert(index: usize, term: usize, key: String, value: Object) -> Self {
+        LogEntry {
+            ltype: LogType::Insert as i32,
+            index: index as u64,
+            term: term as u64,
+            key,
+            value: Some(value),
+            old_value: None,
+        }
+    }
+    pub fn create_cas(
+        index: usize,
+        term: usize,
+        key: String,
+        old_value: Object,
+        value: Object,
+    ) -> Self {
+        LogEntry {
+            ltype: LogType::Cas as i32,
+            index: index as u64,
+            term: term as u64,
+            key,
+            value: Some(value),
+            old_value: Some(old_value),
+        }
+    }
+    pub fn create_delete(index: usize, term: usize, key: String) -> Self {
+        LogEntry {
+            ltype: LogType::Delete as i32,
+            index: index as u64,
+            term: term as u64,
+            key,
+            value: None,
+            old_value: None,
+        }
+    }
+}
+
+impl HeartbeatReply {
+    pub fn get_type(&self) -> HeartbeatType {
+        HeartbeatType::try_from(self.htype).expect("Invalid HeartbeatType")
+    }
+}
 
 pub async fn log_manager(
     log: Arc<RwLock<Vec<LogEntry>>>,
-    data: flashmap::WriteHandle<String, Data>,
+    data: flashmap::WriteHandle<String, Object>,
     core: Arc<RwLock<RaftCore>>,
 ) {
     let mut current_index = 0;
@@ -41,39 +102,26 @@ pub async fn log_manager(
             let mut write_guard = writer.guard();
 
             for e in new_entries {
-                match e {
-                    LogEntry::Insert {
-                        key,
-                        data,
-                        index: _,
-                        term: _,
-                    } => {
-                        if key == "foo" {
+                match e.get_type() {
+                    LogType::Insert => {
+                        if e.key == "foo" {
                             eprintln!("logged foo at: {:?}", SystemTime::now());
                         }
-                        write_guard.insert(key, data);
+                        write_guard.insert(e.key, e.value.unwrap_or(Object::default()));
                     }
-                    LogEntry::Delete {
-                        key,
-                        index: _,
-                        term: _,
-                    } => {
-                        write_guard.remove(key);
-                    }
-                    LogEntry::Cas {
-                        key,
-                        old_value,
-                        new_value,
-                        index,
-                        term,
-                    } => {
-                        if let Some(current) = write_guard.get(&key) {
-                            if *current == old_value {
-                                write_guard.insert(key.to_owned(), new_value.to_owned());
+                    LogType::Cas => {
+                        if let Some(current) = write_guard.get(&e.key) {
+                            if e.value.is_none() || e.old_value.is_none() {
+                                continue;
+                            } else if *current == e.old_value.unwrap() {
+                                write_guard.insert(e.key.to_owned(), e.value.unwrap().to_owned());
                             }
                         }
                     }
-                };
+                    LogType::Delete => {
+                        write_guard.remove(e.key);
+                    }
+                }
             }
             write_guard.publish();
             current_index = new_index.min(log_len);
@@ -83,7 +131,7 @@ pub async fn log_manager(
 
 pub async fn raft_state_manager(
     state_ref: watch::Receiver<RaftState>,
-    state_updater: watch::Sender<RaftState>,
+    state_updater: Arc<Mutex<watch::Sender<RaftState>>>,
     core: Arc<RwLock<RaftCore>>,
     log: Arc<RwLock<Vec<LogEntry>>>,
     port: u16,
@@ -118,7 +166,7 @@ pub async fn raft_state_manager(
                     if let Ok(Ok(true)) = won_election {
                         eprintln!("Won Election");
                         let state_updater = state_copy.write().await;
-                        state_updater.send(RaftState::Leader(term));
+                        state_updater.lock().await.send(RaftState::Leader(term));
                         drop(state_updater);
                         let c = core_copy.read().await;
                         let mut l = log_copy.write().await;
@@ -128,45 +176,7 @@ pub async fn raft_state_manager(
                             if term > log_entry.get_term()
                                 && c.max_committed < log_entry.get_index()
                             {
-                                match log_entry {
-                                    LogEntry::Insert {
-                                        key,
-                                        data,
-                                        index,
-                                        term: t,
-                                    } => {
-                                        *log_entry = LogEntry::Insert {
-                                            key: key.clone(),
-                                            data: data.clone(),
-                                            index: *index,
-                                            term,
-                                        }
-                                    }
-                                    LogEntry::Delete {
-                                        key,
-                                        index,
-                                        term: t,
-                                    } => {
-                                        *log_entry = LogEntry::Delete {
-                                            key: key.clone(),
-                                            index: *index,
-                                            term,
-                                        }
-                                    }
-                                    LogEntry::Cas {
-                                        key,
-                                        old_value,
-                                        new_value,
-                                        index,
-                                        term: t,
-                                    } => {
-                                        *log_entry = LogEntry::Delete {
-                                            key: key.clone(),
-                                            index: *index,
-                                            term,
-                                        }
-                                    }
-                                }
+                                log_entry.set_term(term);
                             }
 
                             eprintln!("{:?}", log_entry);
@@ -178,7 +188,7 @@ pub async fn raft_state_manager(
                         let mut c = core_copy.write().await;
                         c.current_term += 1;
                         let term = c.current_term;
-                        state_updater.send(RaftState::Canidate(term));
+                        state_updater.lock().await.send(RaftState::Canidate(term));
                         drop(state_updater);
                     }
                     eprintln!("Lost Election");
@@ -196,7 +206,10 @@ pub async fn raft_state_manager(
                         if t > term {
                             let mut c = core_copy.write().await;
                             c.current_term = t;
-                            state_updater.send(RaftState::Follower(t, None, true));
+                            state_updater
+                                .lock()
+                                .await
+                                .send(RaftState::Follower(t, None, true));
                         }
                     }
                     drop(state_updater);
@@ -207,9 +220,15 @@ pub async fn raft_state_manager(
                     if !should_continue {
                         let mut c = core_copy.write().await;
                         c.current_term += 1;
-                        state_updater.send(RaftState::Canidate(c.current_term));
+                        state_updater
+                            .lock()
+                            .await
+                            .send(RaftState::Canidate(c.current_term));
                     } else {
-                        state_updater.send(RaftState::Follower(term, addr, false));
+                        state_updater
+                            .lock()
+                            .await
+                            .send(RaftState::Follower(term, addr, false));
                         drop(state_updater);
                         let r = (random::<u64>() % 200) + 300;
                         tokio::time::sleep(tokio::time::Duration::from_millis(r)).await;
@@ -218,23 +237,7 @@ pub async fn raft_state_manager(
             }
         }
     });
-
-    loop {
-        if let Ok((mut socket, _)) = listener.accept().await {
-            let core = core.clone();
-            let state_owner = state_owner.clone();
-            let log = log.clone();
-            tokio::task::spawn(async move {
-                handle_management_request(
-                    &mut socket,
-                    core.clone(),
-                    state_owner.clone(),
-                    log.clone(),
-                )
-                .await
-            });
-        }
-    }
+    Ok(())
 }
 
 async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
@@ -248,10 +251,9 @@ async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
     let members = c.members.clone();
     let target_votes = (members.len() + 1) / 2 + 1;
     let mut current_votes = 1;
-
-    let request = RaftManagementRequest::RequestVote {
-        current_term: c.current_term,
-        max_received: c.max_received,
+    let request = RequestVoteRequest {
+        current_term: c.current_term as u64,
+        max_received: c.max_received as u64,
     };
 
     // Spawn vote requests as individual tasks
@@ -262,21 +264,25 @@ async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
 
     // Wait for the vote requests to complete in any order, returning early if the result of the election can be determined
     while !pool.is_empty() {
-        if let Some(Ok(response)) = pool.join_next().await {
-            match response {
-                Ok(RaftManagementResponse::VoteOk {}) => current_votes += 1,
-                Ok(RaftManagementResponse::VoteRejected {
-                    current_term,
-                    max_received: _,
-                }) => {
-                    eprintln!("Vote was rejected, updating term");
-                    if c.current_term < current_term {
-                        c.current_term = current_term;
-                        return Ok(false);
-                    }
+        if let Some(Ok(Ok(response))) = pool.join_next().await {
+            if let RequestVoteReply {
+                current_term: None,
+                max_received: None,
+            } = response
+            {
+                current_votes += 1;
+            } else {
+                eprintln!("Vote was rejected, updating term");
+                let term_check = c.current_term;
+                c.current_term = c
+                    .current_term
+                    .max(response.current_term.unwrap_or(0) as usize)
+                    .max(response.max_received.unwrap_or(0) as usize);
+                if term_check != c.current_term {
+                    return Ok(false);
                 }
-                _ => continue,
             }
+
             if current_votes >= target_votes {
                 eprintln!("Votes {}:{}", current_votes, target_votes);
                 return Ok(true);
@@ -318,12 +324,12 @@ async fn send_global_heartbeat(
 
     let mut state = c.clone();
 
-    let request = RaftManagementRequest::Heartbeat {
+    let request = HeartbeatRequest {
         latest_sent: last,
-        current_term: state.current_term,
-        commit_to: state.max_committed,
+        current_term: state.current_term as u64,
+        commit_to: state.max_committed as u64,
         log_entries: new_logs,
-        address: c.address,
+        address: c.address.to_string(),
     };
 
     // Spawn heartbeats as individual tasks
@@ -337,58 +343,63 @@ async fn send_global_heartbeat(
     }
 
     // Wait for the heartbeats to complete in any order, adding a new request to the pool in the instance of a heartbeat add-one response
+    let mut request;
     while !pool.is_empty() {
-        if let Some(Ok(response)) = pool.join_next().await {
-            match response {
-                (Ok(RaftManagementResponse::HeartbeatAddOne { max_received }), address) => {
-                    let request;
-                    let log = log.clone();
-                    let l = log.read().await;
-                    let latest_sent = l.get(max_received - 2).cloned();
-                    if let Some(latest) = latest_sent {
-                        let entries = l
-                            .clone()
-                            .into_iter()
-                            .filter(|x| x.get_index() >= latest.get_index())
-                            .collect();
-                        request = RaftManagementRequest::Heartbeat {
-                            latest_sent: Some(latest),
-                            current_term: state.current_term,
-                            commit_to: state.max_committed,
-                            log_entries: entries,
-                            address: c.address,
-                        };
-                    } else {
-                        let entries = l.clone();
-                        request = RaftManagementRequest::Heartbeat {
-                            latest_sent: None,
-                            current_term: state.current_term,
-                            commit_to: state.max_committed,
-                            log_entries: entries,
-                            address: c.address,
-                        };
+        if let Some(Ok((Ok(response), addr))) = pool.join_next().await {
+            match response.get_type() {
+                HeartbeatType::AddOne => {
+                    if let HeartbeatReply {
+                        htype: _,
+                        max_received: Some(max_received),
+                        current_term: _,
+                    } = response
+                    {
+                        let log = log.clone();
+                        let l = log.read().await;
+
+                        // Safe because assertion above guarantees that max_received is Some
+                        let latest_sent = l.get((max_received - 2) as usize).cloned();
+                        if let Some(latest) = latest_sent {
+                            let entries = l
+                                .clone()
+                                .into_iter()
+                                .filter(|x| x.get_index() >= latest.get_index())
+                                .collect();
+
+                            request = HeartbeatRequest {
+                                latest_sent: Some(latest),
+                                current_term: state.current_term as u64,
+                                commit_to: state.max_committed as u64,
+                                log_entries: entries,
+                                address: c.address.to_string(),
+                            }
+                        } else {
+                            let entries = l.clone();
+                            request = HeartbeatRequest {
+                                latest_sent: None,
+                                current_term: state.current_term as u64,
+                                commit_to: state.max_committed as u64,
+                                log_entries: entries,
+                                address: c.address.to_string(),
+                            };
+                        }
+                        eprintln!("Sent HeartbeatAddOne: {:?}", request);
+                        pool.spawn(async move {
+                            let x = send_heartbeat(addr, request.clone()).await;
+                            return (x, addr);
+                        });
                     }
-                    eprintln!("Sent HeartbeatAddOne: {:?}", request);
-                    pool.spawn(async move {
-                        let x = send_heartbeat(address, request.clone()).await;
-                        return (x, address);
-                    });
                 }
-                (
-                    Ok(RaftManagementResponse::HeartbeatOk {
-                        max_received,
-                        current_term,
-                    }),
-                    _,
-                ) => {
+                HeartbeatType::Ok => {
                     eprintln!("heartbeat ok");
-                    max_recieved_members.push(max_received);
+                    max_recieved_members.push(response.max_received.unwrap_or(0) as usize);
                 }
-                (Ok(RaftManagementResponse::HeartbeatRejected { current_term }), _) => {
+                HeartbeatType::Rejected => {
                     eprintln!("heartbeat reject");
-                    state.current_term = state.current_term.max(current_term);
+                    state.current_term = state
+                        .current_term
+                        .max(response.current_term.unwrap_or(0) as usize);
                 }
-                _ => continue,
             }
         }
     }

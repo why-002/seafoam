@@ -6,6 +6,8 @@ service Seafoam {
     rpc Set (SetRequest) returns (SetReply);
     rpc Cas (CasRequest) returns (CasReply);
     rpc Delete (DeleteRequest) returns (DeleteReply);
+    rpc Heartbeat (HeartbeatRequest) returns (HeartbeatReply);
+    rpc RequestVote (RequestVoteRequest) returns (RequestVoteReply);
 }
 
 message GetRequest {
@@ -13,12 +15,12 @@ message GetRequest {
 }
 
 message GetReply {
-    repeated string values = 1;
+    repeated Object values = 1;
 }
 
 message SetRequest {
     string key = 1;
-    string value = 2;
+    Object value = 2;
 }
 
 message SetReply {
@@ -35,10 +37,78 @@ message DeleteReply {
 
 message CasRequest {
   string key = 1;
-  string old_value = 2;
-  string new_value = 3;
+  Object old_value = 2;
+  Object new_value = 3;
 }
 
 message CasReply {
   bool success = 1;
 }
+
+message LogEntry {
+    LogType ltype = 1;
+    uint64 index = 2;
+    uint64 term = 3;
+    string key = 4;
+    optional Object value = 5;
+    optional Object old_value = 6;
+}
+
+enum LogType {
+    Insert = 0;
+    Delete = 1;
+    Cas = 2;
+}
+
+message Object {
+  map<string, Data> fields = 1;
+}
+
+message Data {
+  oneof kind {
+    NullValue null_value = 1;
+    uint64 number_value = 2;
+    string string_value = 3;
+    bool bool_value = 4;
+    Object object_value = 5;
+    ListValue list_value = 6;
+  }
+}
+
+message ListValue {
+  repeated Data values = 1;
+}
+
+enum NullValue {
+  NULL_Value = 0;
+}
+
+message HeartbeatRequest {
+  optional LogEntry latest_sent = 1;
+  uint64 current_term = 2;
+  uint64 commit_to = 3;
+  repeated LogEntry log_entries = 4;
+  string address = 5;
+}
+
+message RequestVoteRequest {
+  uint64 current_term = 1;
+  uint64 max_received = 2;
+}
+
+message HeartbeatReply {
+  enum HeartbeatType {
+    ok = 0;
+    rejected = 1;
+    addOne = 2;
+  }
+  HeartbeatType htype = 1;
+  optional uint64 max_received = 2;
+  optional uint64 current_term = 3;
+}
+
+message RequestVoteReply {
+  optional uint64 current_term = 1;
+  optional uint64 max_received = 2;
+}
+

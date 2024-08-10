@@ -1,7 +1,8 @@
 use core::task;
 use hello_world::seafoam_client::SeafoamClient;
-use hello_world::{GetRequest, SetRequest};
+use hello_world::{GetRequest, Object, SetRequest};
 use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::*;
 use tokio::sync::Semaphore;
@@ -12,8 +13,6 @@ use tonic::transport::channel;
 pub mod hello_world {
     tonic::include_proto!("seafoam");
 }
-
-use seafoam::raft::Data;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     let request = tonic::Request::new(SetRequest {
                         key: "hello".to_string(),
-                        value: "{\"name\": \"world\"}".to_string(),
+                        value: None,
                     });
                     let response = client.set(request).await.unwrap();
                     //println!("{:?}", response.into_inner());
