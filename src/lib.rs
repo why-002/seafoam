@@ -1,9 +1,12 @@
 use heartbeat_reply::HeartbeatType;
 use http::{request, response};
 use std::{net::SocketAddr, str::FromStr, sync::Arc};
-use tokio::sync::{
-    watch::{self},
-    Mutex, RwLock,
+use tokio::{
+    net::unix::pipe::Receiver,
+    sync::{
+        watch::{self},
+        Mutex, RwLock,
+    },
 };
 
 pub mod raft;
@@ -23,8 +26,8 @@ pub struct Server {
     pub db: ReadHandle<String, Object>,
     pub log: Arc<RwLock<Vec<LogEntry>>>,
     pub core_state: Arc<RwLock<RaftCore>>,
-    pub state_receiver: watch::Receiver<RaftState>,
-    pub state_sender: Arc<Mutex<watch::Sender<RaftState>>>,
+    pub raft_receiver: watch::Receiver<RaftState>,
+    pub raft_sender: watch::Sender<RaftState>,
 }
 
 #[tonic::async_trait]
@@ -38,8 +41,8 @@ impl Seafoam for Server {
         for key in keys {
             let data = self.db.guard().get(&key).cloned();
             match data {
-                data => {
-                    resp.push(data.unwrap());
+                Some(data) => {
+                    resp.push(data);
                 }
                 _ => {}
             }
@@ -51,7 +54,7 @@ impl Seafoam for Server {
         &self,
         request: tonic::Request<SetRequest>,
     ) -> Result<Response<SetReply>, tonic::Status> {
-        let state = self.state_receiver.borrow().clone();
+        let state = self.raft_receiver.borrow().clone();
         match state {
             RaftState::Leader(term) => {
                 let message = request.into_inner();
@@ -89,7 +92,7 @@ impl Seafoam for Server {
         &self,
         request: tonic::Request<DeleteRequest>,
     ) -> Result<Response<DeleteReply>, tonic::Status> {
-        let state = self.state_receiver.borrow().clone();
+        let state = self.raft_receiver.borrow().clone();
         match state {
             RaftState::Leader(term) => {
                 let message = request.into_inner();
@@ -123,7 +126,7 @@ impl Seafoam for Server {
         &self,
         request: tonic::Request<CasRequest>,
     ) -> Result<Response<CasReply>, tonic::Status> {
-        let state = self.state_receiver.borrow().clone();
+        let state = self.raft_receiver.borrow().clone();
         match state {
             RaftState::Leader(term) => {
                 let message = request.into_inner();
@@ -176,8 +179,6 @@ impl Seafoam for Server {
         request: tonic::Request<HeartbeatRequest>,
     ) -> Result<Response<HeartbeatReply>, tonic::Status> {
         let req = request.into_inner();
-        let state = self.state_receiver.borrow().clone();
-        let num = self.log.read().await.last().unwrap().get_index();
         let c = self.core_state.read().await;
 
         if c.current_term > req.current_term as usize {
@@ -193,15 +194,11 @@ impl Seafoam for Server {
             }));
         }
 
-        let sender = self.state_sender.lock().await;
-        sender
-            .send(RaftState::Follower(
-                req.current_term as usize,
-                Some(SocketAddr::from_str(req.address.as_str()).unwrap()),
-                true,
-            ))
-            .unwrap();
-        drop(sender);
+        self.raft_sender.send(RaftState::Follower(
+            req.current_term as usize,
+            Some(SocketAddr::from_str(req.address.as_str()).unwrap()),
+            true,
+        ));
 
         let old_received = c.max_received;
         let mut current_term = c.current_term;
@@ -235,7 +232,6 @@ impl Seafoam for Server {
                         htype: HeartbeatType::AddOne as i32,
                         max_received: Some(old_received.min(x.get_index()) as u64),
                     };
-                    eprintln!("Responding with {:?}", response);
                 }
             }
             (Some(x), None) => {
@@ -262,10 +258,7 @@ impl Seafoam for Server {
         &self,
         req: tonic::Request<RequestVoteRequest>,
     ) -> Result<Response<RequestVoteReply>, tonic::Status> {
-        let state = self.state_receiver.borrow().clone();
-        let num = self.log.read().await.last().unwrap().get_index();
-        let s = self.core_state.read().await;
-        let max_received = s.max_received;
+        let mut s = self.core_state.write().await;
         let req_inner = req.into_inner();
 
         let response = Ok(Response::new(RequestVoteReply {
@@ -280,6 +273,8 @@ impl Seafoam for Server {
         } else if s.max_received > req_inner.max_received as usize {
             return response;
         }
+        s.current_term = req_inner.current_term as usize;
+        s.last_voted = req_inner.current_term as usize;
 
         Ok(Response::new(RequestVoteReply {
             current_term: None,

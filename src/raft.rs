@@ -2,11 +2,8 @@ use anyhow::Error;
 use flashmap::{self};
 use heartbeat_reply::HeartbeatType;
 use rand::prelude::*;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 use tokio::sync::{
     watch::{self},
     RwLock,
@@ -130,28 +127,16 @@ pub async fn log_manager(
 }
 
 pub async fn raft_state_manager(
-    state_ref: watch::Receiver<RaftState>,
-    state_updater: Arc<Mutex<watch::Sender<RaftState>>>,
+    raft_sender: watch::Sender<RaftState>,
+    raft_receiver: watch::Receiver<RaftState>,
     core: Arc<RwLock<RaftCore>>,
     log: Arc<RwLock<Vec<LogEntry>>>,
-    port: u16,
 ) -> Result<(), std::io::Error> {
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = TcpListener::bind(addr).await?;
-    println!("Listening on http://{}", addr);
-
     let core_copy = core.clone();
     let log_copy = log.clone();
-    let state_owner = Arc::new(RwLock::new(state_updater));
-    let state_copy = state_owner.clone();
-    let state_ref_copy = state_ref.clone();
     tokio::task::spawn(async move {
-        let state_ref_copy = state_ref_copy;
-        let state_copy = state_copy;
-
         loop {
-            let state_ref_copy = state_ref_copy.clone();
-            let state = state_ref_copy.borrow().clone();
+            let state = raft_receiver.borrow().clone();
             match state {
                 RaftState::Canidate(term) => {
                     let won_election = tokio::time::timeout(
@@ -160,76 +145,57 @@ pub async fn raft_state_manager(
                     )
                     .await;
 
-                    let current_state = state_ref_copy.borrow().clone();
+                    let current_state = raft_receiver.borrow().clone();
                     eprintln!("Finished Election");
 
                     if let Ok(Ok(true)) = won_election {
                         eprintln!("Won Election");
-                        let state_updater = state_copy.write().await;
-                        state_updater.lock().await.send(RaftState::Leader(term));
-                        drop(state_updater);
+                        raft_sender.send(RaftState::Leader(term));
                         let c = core_copy.read().await;
                         let mut l = log_copy.write().await;
 
                         // Will need to update this once log compaction is implemented as this will no longer work appropriately
-                        for log_entry in l[0.min(c.max_committed - 1)..].iter_mut() {
-                            if term > log_entry.get_term()
-                                && c.max_committed < log_entry.get_index()
-                            {
-                                log_entry.set_term(term);
+                        let start = (c.max_committed.checked_sub(1).unwrap_or(0));
+                        if start < l.len() {
+                            for log_entry in l[..].iter_mut() {
+                                if term > log_entry.get_term()
+                                    && c.max_committed < log_entry.get_index()
+                                {
+                                    log_entry.set_term(term);
+                                }
                             }
-
-                            eprintln!("{:?}", log_entry);
                         }
                         eprintln!("State is {:?}. Changing to Leader", state);
                         continue;
                     } else if let RaftState::Canidate(_) = current_state {
-                        let state_updater = state_copy.write().await;
                         let mut c = core_copy.write().await;
                         c.current_term += 1;
                         let term = c.current_term;
-                        state_updater.lock().await.send(RaftState::Canidate(term));
-                        drop(state_updater);
+                        raft_sender.send(RaftState::Canidate(term));
                     }
                     eprintln!("Lost Election");
                     let r = (random::<u64>() % 200) + 300;
                     tokio::time::sleep(tokio::time::Duration::from_millis(r)).await;
                 }
                 RaftState::Leader(term) => {
-                    let state_updater = state_copy.write().await;
-                    let h = tokio::time::timeout(
-                        tokio::time::Duration::from_millis(100),
-                        send_global_heartbeat(core_copy.clone(), log_copy.clone()),
-                    );
+                    let h = send_global_heartbeat(core_copy.clone(), log_copy.clone());
                     let t = h.await;
-                    if let Ok(Ok(t)) = t {
+                    if let Ok(t) = t {
                         if t > term {
                             let mut c = core_copy.write().await;
                             c.current_term = t;
-                            state_updater
-                                .lock()
-                                .await
-                                .send(RaftState::Follower(t, None, true));
+                            raft_sender.send(RaftState::Follower(t, None, true));
                         }
                     }
-                    drop(state_updater);
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
                 RaftState::Follower(term, addr, should_continue) => {
-                    let state_updater = state_copy.write().await;
                     if !should_continue {
                         let mut c = core_copy.write().await;
                         c.current_term += 1;
-                        state_updater
-                            .lock()
-                            .await
-                            .send(RaftState::Canidate(c.current_term));
+                        raft_sender.send(RaftState::Canidate(c.current_term));
                     } else {
-                        state_updater
-                            .lock()
-                            .await
-                            .send(RaftState::Follower(term, addr, false));
-                        drop(state_updater);
+                        raft_sender.send(RaftState::Follower(term, addr, false));
                         let r = (random::<u64>() % 200) + 300;
                         tokio::time::sleep(tokio::time::Duration::from_millis(r)).await;
                     }
@@ -284,15 +250,15 @@ async fn run_election(core: Arc<RwLock<RaftCore>>) -> Result<bool, Error> {
             }
 
             if current_votes >= target_votes {
-                eprintln!("Votes {}:{}", current_votes, target_votes);
+                eprintln!("0:Votes {}:{}", current_votes, target_votes);
                 return Ok(true);
             } else if current_votes + pool.len() < target_votes {
-                eprintln!("Votes {}:{}", current_votes, target_votes);
+                eprintln!("1:Votes {}:{}", current_votes, target_votes);
                 return Ok(false);
             }
         }
     }
-    eprintln!("Votes {}:{}", current_votes, target_votes);
+    eprintln!("2:Votes {}:{}", current_votes, target_votes);
     return Ok(current_votes >= target_votes);
 }
 
@@ -314,7 +280,13 @@ async fn send_global_heartbeat(
     }
 
     let new_logs = l[c.max_received..].to_vec();
-    let last = l.get(c.max_received - 1).cloned();
+    let last;
+
+    if let Some(max) = c.max_received.checked_sub(1) {
+        last = l.get(max).cloned();
+    } else {
+        last = None;
+    }
 
     if let Some(last_entry) = l.last() {
         c.max_received = last_entry.get_index();
@@ -323,18 +295,21 @@ async fn send_global_heartbeat(
     drop(l);
 
     let mut state = c.clone();
+    let addr = state.address.clone();
+    drop(c);
 
     let request = HeartbeatRequest {
         latest_sent: last,
         current_term: state.current_term as u64,
         commit_to: state.max_committed as u64,
         log_entries: new_logs,
-        address: c.address.to_string(),
+        address: addr.to_string(),
     };
 
     // Spawn heartbeats as individual tasks
     let mut pool = tokio::task::JoinSet::new();
     for address in addresses {
+        eprintln!("Sending Heartbeat: {:?}", address);
         let request = request.clone();
         pool.spawn(async move {
             let x = send_heartbeat(address, request.clone()).await;
@@ -358,7 +333,9 @@ async fn send_global_heartbeat(
                         let l = log.read().await;
 
                         // Safe because assertion above guarantees that max_received is Some
-                        let latest_sent = l.get((max_received - 2) as usize).cloned();
+                        let latest_sent = l
+                            .get((max_received.checked_sub(2).unwrap_or(0)) as usize)
+                            .cloned();
                         if let Some(latest) = latest_sent {
                             let entries = l
                                 .clone()
@@ -371,7 +348,7 @@ async fn send_global_heartbeat(
                                 current_term: state.current_term as u64,
                                 commit_to: state.max_committed as u64,
                                 log_entries: entries,
-                                address: c.address.to_string(),
+                                address: addr.to_string(),
                             }
                         } else {
                             let entries = l.clone();
@@ -380,10 +357,10 @@ async fn send_global_heartbeat(
                                 current_term: state.current_term as u64,
                                 commit_to: state.max_committed as u64,
                                 log_entries: entries,
-                                address: c.address.to_string(),
+                                address: addr.to_string(),
                             };
                         }
-                        eprintln!("Sent HeartbeatAddOne: {:?}", request);
+                        eprintln!("Sent HeartbeatAddOne");
                         pool.spawn(async move {
                             let x = send_heartbeat(addr, request.clone()).await;
                             return (x, addr);
@@ -405,13 +382,17 @@ async fn send_global_heartbeat(
     }
 
     // Calculate the median of the max_recieved_members and update the max_committed value
+    let mut c = core.write().await;
     max_recieved_members.push(c.max_received);
-    let loc = max_recieved_members.len() / 2 - 1;
-    eprintln!("{:?}", max_recieved_members);
-    if loc <= max_recieved_members.len() - 1 && max_recieved_members.len() != 0 {
-        let (_, median, _) = max_recieved_members.select_nth_unstable(loc);
-        c.max_committed = *median;
+    let loc = c.members.len() / 2;
+    eprintln!("responses: {:?}", max_recieved_members);
+    while max_recieved_members.len() < c.members.len() {
+        max_recieved_members.push(0);
     }
+
+    let (_, median, _) = max_recieved_members.select_nth_unstable(loc);
+
+    c.max_committed = *median.min(&mut (c.max_received.clone()));
 
     return Ok(state.current_term.max(c.current_term));
 }

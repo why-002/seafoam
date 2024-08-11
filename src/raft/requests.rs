@@ -3,16 +3,13 @@ use crate::{
     RequestVoteRequest,
 };
 use anyhow::Error;
-use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
-use tonic::transport::channel;
-use tonic::{client, Response};
+use tonic::{transport::channel, Request};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RaftManagementRequest {}
@@ -21,23 +18,29 @@ pub async fn send_heartbeat(
     address: SocketAddr,
     request: HeartbeatRequest,
 ) -> Result<HeartbeatReply, Error> {
-    let endpoint = channel::Endpoint::from_shared(address.to_string()).unwrap();
-    let mut client = SeafoamClient::new(endpoint.connect().await?);
-    let result = tokio::time::timeout(Duration::from_millis(75), async {
-        client.heartbeat(request).await
-    });
+    let endpoint =
+        channel::Endpoint::from_shared("http://".to_string() + &address.to_string()).unwrap();
 
-    return Ok(result.await.unwrap()?.into_inner());
+    let mut client = SeafoamClient::new(endpoint.connect().await?);
+    let result = tokio::time::timeout(tokio::time::Duration::from_millis(100), async {
+        client.heartbeat(request).await
+    })
+    .await;
+
+    return Ok(result??.into_inner());
 }
 
 pub async fn send_vote_request(
     address: SocketAddr,
     request: RequestVoteRequest,
 ) -> Result<RequestVoteReply, Error> {
-    let endpoint = channel::Endpoint::from_shared(address.to_string()).unwrap();
+    let endpoint =
+        channel::Endpoint::from_shared("http://".to_string() + &address.to_string()).unwrap();
+
     let mut client = SeafoamClient::new(endpoint.connect().await?);
-    let result = tokio::time::timeout(Duration::from_millis(75), async {
+    let result = tokio::time::timeout(tokio::time::Duration::from_millis(100), async {
         client.request_vote(request).await
-    });
-    return Ok(result.await.unwrap()?.into_inner());
+    })
+    .await;
+    return Ok(result??.into_inner());
 }
