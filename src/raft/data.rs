@@ -2,21 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
-pub enum Data {
-    String(String),
-    Int(u32),
-    Array(Vec<Data>),
-    Map(HashMap<String, Data>),
-    Bytes(Vec<u8>),
-}
+use crate::Object;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LogEntry {
     Insert {
         key: String,
-        data: Data,
+        data: Object,
         index: usize,
         term: usize,
     },
@@ -27,8 +19,8 @@ pub enum LogEntry {
     },
     Cas {
         key: String,
-        old_value: Data,
-        new_value: Data,
+        old_value: Object,
+        new_value: Object,
         index: usize,
         term: usize,
     },
